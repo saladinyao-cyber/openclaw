@@ -27,7 +27,12 @@ import type { EmbeddingProvider, EmbeddingProviderRequest } from "./embeddings.j
 import { awaitPendingManagerWork } from "./manager-async-state.js";
 import { MEMORY_BATCH_FAILURE_LIMIT } from "./manager-batch-state.js";
 import { MemoryIndexDatabase } from "./manager-database-context.js";
-import { closeMemoryDatabase, memoryDatabaseTableExists } from "./manager-db.js";
+import {
+  assertMemorySearchDatabaseSchema,
+  assertMemorySearchIndexReady,
+  closeMemoryDatabase,
+  memoryDatabaseTableExists,
+} from "./manager-db.js";
 import {
   clearMemoryEmbeddingProbeCache,
   resolveEffectiveMemorySearchSettings,
@@ -41,7 +46,6 @@ import {
   type MemoryProviderLifecycleState,
 } from "./manager-provider-state.js";
 import {
-  isTransientMemoryIndexManagerPurpose,
   MemoryManagerRegistry,
   normalizeMemoryIndexManagerPurpose,
   resolveMemoryIndexManagerCacheKey,
@@ -75,6 +79,11 @@ export async function closeMemoryIndexManagersForAgent(params: { agentId: string
   await INDEX_MANAGER_REGISTRY.closeForAgent({
     agentId: params.agentId,
     purpose: "maintenance",
+    close: async (manager) => await manager.close(),
+  });
+  await INDEX_MANAGER_REGISTRY.closeForAgent({
+    agentId: params.agentId,
+    purpose: "search",
     close: async (manager) => await manager.close(),
   });
 }
@@ -207,7 +216,9 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
     for (const source of effectiveSettings.sources) {
       this.sources.add(source);
     }
-    this.publishedDatabase = new MemoryIndexDatabase(this.openDatabase(this.purpose === "status"));
+    this.publishedDatabase = new MemoryIndexDatabase(
+      this.openDatabase(this.purpose === "status" || this.purpose === "search"),
+    );
     try {
       this.providerKey = this.computeProviderKey();
       this.cache = {
@@ -215,7 +226,13 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
         maxEntries: effectiveSettings.cache.maxEntries,
       };
       this.fts.enabled = effectiveSettings.query.hybrid.enabled;
-      if (this.purpose === "status") {
+      if (this.purpose === "search") {
+        assertMemorySearchDatabaseSchema(this.db, {
+          ftsEnabled: this.fts.enabled,
+          ftsTokenizer: this.settings.store.fts.tokenizer,
+        });
+        this.fts.available = this.fts.enabled;
+      } else if (this.purpose === "status") {
         this.fts.available =
           this.fts.enabled && memoryDatabaseTableExists(this.db, "main", MEMORY_INDEX_FTS_TABLE);
       } else {
@@ -232,10 +249,20 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
         providerKeyKnown: false,
       });
       this.indexIdentityState = initialIndexIdentity;
+      if (this.purpose === "search") {
+        assertMemorySearchIndexReady({
+          db: this.db,
+          identity: initialIndexIdentity,
+          vectorEnabled: this.vector.enabled,
+          metaVectorDims: meta?.vectorDims,
+          hasSemanticChunks: this.hasSemanticChunks(),
+        });
+      }
       this.indexIdentityDirty =
         initialIndexIdentity.status === "mismatched" ||
         (initialIndexIdentity.status === "missing" && this.sources.has("memory"));
-      const transient = isTransientMemoryIndexManagerPurpose(this.purpose);
+      // Search managers stay cached in the registry but own no write-side lifecycle.
+      const transient = this.purpose !== "default";
       const invalidatedSources = new Set(
         (
           this.db
@@ -275,6 +302,9 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
   async sync(params?: MemorySyncParams): Promise<void> {
     if (this.purpose === "status") {
       throw new Error("Memory status managers are read-only");
+    }
+    if (this.purpose === "search") {
+      throw new Error("Read-only memory search manager cannot sync or mutate the index");
     }
     return await this.withPublishedDatabase(() => this.syncPublished(params));
   }
@@ -325,6 +355,9 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
       queuedSessionOwner?: boolean;
     },
   ): Promise<void> {
+    if (this.purpose === "search") {
+      throw new Error("Read-only memory search manager cannot sync or mutate the index");
+    }
     if (this.syncing) {
       if (hasTargetedSessionSyncParams(params)) {
         if (options?.queuedSessionOwner) {

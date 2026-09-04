@@ -27,6 +27,7 @@ import {
 import { withMemoryWorkspaceLock } from "../memory-workspace-lock.js";
 import { withMemoryIndexPublishGeneration } from "./manager-index-generation-lease.js";
 import { waitForMemoryReindexLock } from "./manager-reindex-lock.js";
+import { resolvePersistedMemoryVectorIndexState } from "./manager-vector-rebuild-state.js";
 
 const MEMORY_REINDEX_SCHEMA = "memory_reindex";
 const MEMORY_INDEX_STATE_ID = 1;
@@ -36,6 +37,20 @@ const MEMORY_REINDEX_ENTRY_SUFFIXES = ["-wal", "-shm", "-journal", ""] as const;
 const MEMORY_REINDEX_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MEMORY_REINDEX_ORPHAN_MIN_AGE_MS = 24 * 60 * 60_000;
+const MEMORY_SEARCH_REQUIRED_TABLES = [
+  "memory_index_meta",
+  "memory_index_sources",
+  "memory_index_chunks",
+  "memory_index_chunk_recall_metadata",
+  "memory_index_chunk_provenance",
+  "memory_index_state",
+] as const;
+const MEMORY_SEARCH_REQUIRED_INDEXES = [
+  "idx_memory_index_sources_source",
+  "idx_memory_index_chunks_path_source",
+  "idx_memory_index_chunks_path",
+  "idx_memory_index_chunks_source",
+] as const;
 
 function resolveMemoryReindexBaseName(
   databaseBaseName: string,
@@ -455,6 +470,7 @@ export function openMemoryDatabaseReadOnlyAtPath(
     database.close();
     return openUninitializedMemoryDatabase(allowExtension);
   }
+  database.db.exec("PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;");
   READ_ONLY_MEMORY_DATABASES.set(database.db, database.close);
   return database.db;
 }
@@ -472,4 +488,85 @@ export function closeMemoryDatabase(db: DatabaseSync): void {
 
 export function isMemoryDatabaseReadOnly(db: DatabaseSync): boolean {
   return READ_ONLY_MEMORY_DATABASES.has(db);
+}
+
+/** Validate the small, search-critical derived schema without repairing or mutating it. */
+export function assertMemorySearchDatabaseSchema(
+  db: DatabaseSync,
+  params: { ftsEnabled: boolean; ftsTokenizer?: "unicode61" | "trigram" },
+): void {
+  const required = [
+    ...MEMORY_SEARCH_REQUIRED_TABLES.map((name) => ({ type: "table", name })),
+    ...MEMORY_SEARCH_REQUIRED_INDEXES.map((name) => ({ type: "index", name })),
+    ...(params.ftsEnabled
+      ? [
+          { type: "table", name: "memory_index_chunks_fts" },
+          { type: "table", name: "memory_index_paths_fts" },
+        ]
+      : []),
+  ];
+  for (const entry of required) {
+    const row = db
+      .prepare("SELECT type FROM sqlite_schema WHERE name = ? COLLATE NOCASE")
+      .get(entry.name) as { type?: unknown } | undefined;
+    if (row?.type !== entry.type) {
+      throw new Error(
+        `Memory search database schema is incomplete: missing ${entry.type} ${entry.name}; run openclaw doctor --fix and rebuild the memory index.`,
+      );
+    }
+  }
+  const revision = db
+    .prepare("SELECT revision FROM memory_index_state WHERE id = ?")
+    .get(MEMORY_INDEX_STATE_ID) as { revision?: unknown } | undefined;
+  if (typeof revision?.revision !== "number" || !Number.isSafeInteger(revision.revision)) {
+    throw new Error("Memory search database revision marker is missing or invalid");
+  }
+  if (!params.ftsEnabled) {
+    return;
+  }
+  const expectedTokenizer = params.ftsTokenizer ?? "unicode61";
+  for (const tableName of ["memory_index_chunks_fts", "memory_index_paths_fts"]) {
+    const row = db
+      .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ? COLLATE NOCASE")
+      .get(tableName) as { sql?: unknown } | undefined;
+    const sql = typeof row?.sql === "string" ? row.sql.toLowerCase() : "";
+    const isFts5 = /\busing\s+fts5\s*\(/u.test(sql);
+    const tokenizerMatches =
+      expectedTokenizer === "trigram"
+        ? /tokenize\s*=\s*['"]trigram case_sensitive 0['"]/u.test(sql)
+        : !/tokenize\s*=\s*['"]trigram/u.test(sql);
+    if (!isFts5 || !tokenizerMatches) {
+      throw new Error(
+        `Memory search database FTS schema is incompatible for ${tableName}; rebuild the memory index.`,
+      );
+    }
+  }
+}
+
+export function assertMemorySearchIndexReady(params: {
+  db: DatabaseSync;
+  identity: { status: "valid" } | { status: "missing" | "mismatched"; reason: string };
+  vectorEnabled: boolean;
+  metaVectorDims?: number;
+  hasSemanticChunks: boolean;
+}): void {
+  if (params.identity.status !== "valid") {
+    throw new Error(
+      `Memory search index identity is ${params.identity.status}: ${params.identity.reason}`,
+    );
+  }
+  if (!params.vectorEnabled) {
+    return;
+  }
+  const vectorState = resolvePersistedMemoryVectorIndexState({
+    db: params.db,
+    vectorTable: MEMORY_INDEX_VECTOR_TABLE,
+    metaVectorDims: params.metaVectorDims,
+    hasSemanticChunks: params.hasSemanticChunks,
+  }).state;
+  if (vectorState !== "complete" && vectorState !== "empty") {
+    throw new Error(
+      `Memory search vector index is ${vectorState}; run a writable memory index rebuild before searching.`,
+    );
+  }
 }

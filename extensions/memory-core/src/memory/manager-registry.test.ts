@@ -1,5 +1,6 @@
 // Memory Core tests cover manager registry behavior.
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
 import { createManagerIndexFixture } from "./manager-index.test-support.js";
 import {
@@ -17,6 +18,78 @@ describe("memory index", () => {
   });
   const { provider: providerFixture } = fixture;
   const { createConfig: createCfg, getFreshManager, requireManager, trackManager } = fixture;
+
+  it("reuses read-only search alongside the persistent default writer", async () => {
+    const cfg = createCfg({ provider: "none", vectorEnabled: false });
+    const writer = requireManager(await getMemorySearchManager({ cfg, agentId: "main" }));
+    trackManager(writer);
+    await writer.sync({ force: true, reason: "test-search-cache" });
+
+    const first = requireManager(
+      await getMemorySearchManager({ cfg, agentId: "main", purpose: "search" }),
+    );
+    trackManager(first);
+    const second = requireManager(
+      await getMemorySearchManager({ cfg, agentId: "main", purpose: "search" }),
+    );
+    expect(second).toBe(first);
+    const retainedWriter = requireManager(await getMemorySearchManager({ cfg, agentId: "main" }));
+    expect(retainedWriter).toBe(writer);
+    expect(first).not.toBe(writer);
+    const searchDb = Reflect.get(first, "db") as DatabaseSync;
+    expect(searchDb.prepare("PRAGMA query_only").get()).toEqual({ query_only: 1 });
+    expect(() => searchDb.exec("DELETE FROM memory_index_meta")).toThrow();
+    await expect(first.sync({ force: true })).rejects.toThrow(/read-only/iu);
+
+    await closeMemoryIndexManagersForAgent({ agentId: "main" });
+    const replacement = requireManager(
+      await getMemorySearchManager({ cfg, agentId: "main", purpose: "search" }),
+    );
+    trackManager(replacement);
+    expect(replacement === first).toBe(false);
+  });
+
+  it("fails closed when persisted memory index identity does not match", async () => {
+    const cfg = createCfg({ provider: "none", vectorEnabled: false });
+    const writer = requireManager(await getMemorySearchManager({ cfg, agentId: "main" }));
+    trackManager(writer);
+    await writer.sync({ force: true, reason: "test-search-identity" });
+    const databasePath = writer.status().dbPath!;
+    await writer.close();
+
+    const db = new DatabaseSync(databasePath);
+    const row = db
+      .prepare("SELECT value FROM memory_index_meta WHERE key = 'memory_index_meta_v1'")
+      .get() as { value: string };
+    db.prepare("UPDATE memory_index_meta SET value = ? WHERE key = 'memory_index_meta_v1'").run(
+      JSON.stringify({ ...JSON.parse(row.value), scopeHash: "wrong-scope" }),
+    );
+    db.close();
+
+    const rejected = await getMemorySearchManager({ cfg, agentId: "main", purpose: "search" });
+    expect(rejected.manager).toBeNull();
+    expect(rejected.error).toMatch(/identity is mismatched|index scope changed/iu);
+  });
+
+  it("fails closed when the persisted vector clean marker requires a rebuild", async () => {
+    const cfg = createCfg({ provider: "mock", vectorEnabled: true });
+    const writer = requireManager(await getMemorySearchManager({ cfg, agentId: "main" }));
+    trackManager(writer);
+    await writer.sync({ force: true, reason: "test-search-vector-clean-marker" });
+    const databasePath = writer.status().dbPath!;
+    await writer.close();
+
+    const db = new DatabaseSync(databasePath);
+    db.prepare(
+      `INSERT INTO memory_index_meta (key, value) VALUES ('memory_vector_rebuild_v1', '1')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run();
+    db.close();
+
+    const rejected = await getMemorySearchManager({ cfg, agentId: "main", purpose: "search" });
+    expect(rejected.manager).toBeNull();
+    expect(rejected.error).toMatch(/vector index is incomplete/iu);
+  });
 
   it("waits for scoped manager close before initializing a replacement", async () => {
     let releaseProviderClose: () => void = () => {};

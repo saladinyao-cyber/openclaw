@@ -110,7 +110,7 @@ export function resolveMemoryEmbeddingProviderRequirement(params: {
 
 export abstract class MemoryProviderLifecycle extends MemoryManagerEmbeddingOps {
   protected abstract readonly cacheKey: string;
-  protected abstract readonly purpose: "default" | "status" | "cli" | "maintenance";
+  protected abstract readonly purpose: "default" | "status" | "cli" | "search" | "maintenance";
   protected abstract readonly providerRequirement: MemoryEmbeddingProviderRequirement;
   protected abstract readonly requestedProvider: EmbeddingProviderRequest;
   protected abstract providerInitPromise: Promise<void> | null;
@@ -218,7 +218,7 @@ export abstract class MemoryProviderLifecycle extends MemoryManagerEmbeddingOps 
 
     const currentIdentity = this.refreshIndexIdentityDirty({ providerKeyKnown: true });
     let activeFailure = failure;
-    if (currentIdentity.status !== "valid") {
+    if (currentIdentity.status !== "valid" && this.purpose !== "search") {
       try {
         await this.syncAdmitted({ reason: "search", force: true });
       } catch (err) {

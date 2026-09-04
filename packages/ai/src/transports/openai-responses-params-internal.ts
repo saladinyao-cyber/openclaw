@@ -174,6 +174,7 @@ export function sanitizeOpenAICodexResponsesParams<T extends Record<string, unkn
   for (const key of OPENAI_CODEX_RESPONSES_UNSUPPORTED_PARAMS) {
     delete params[key];
   }
+  (params as Record<string, unknown>).store = false;
   stripOpenAICodexResponsesUnsupportedTextFields(params);
   return params;
 }
