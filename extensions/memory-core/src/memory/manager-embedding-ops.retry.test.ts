@@ -134,7 +134,7 @@ describe("memory embedding batch retry boundary", () => {
     ["an explicit maximum input length", () => "embeddings max input length is 10"],
     [
       "an explicit maximum batch size",
-      () => "batch size is invalid, it should not be larger than 10",
+      () => "batch size is invalid, it should not be larger than 10.",
     ],
   ])(
     "splits provider errors with %s without retrying oversized requests",
@@ -152,9 +152,9 @@ describe("memory embedding batch retry boundary", () => {
       await expect(manager.embedBatchWithRetry(items)).resolves.toEqual(
         items.map((_, index) => [index]),
       );
-      expect(embedBatch.mock.calls.map(([texts]) => texts.length)).toEqual([
-        33, 17, 9, 8, 16, 8, 8,
-      ]);
+      const payloadCounts = embedBatch.mock.calls.map(([texts]) => texts.length);
+      expect(payloadCounts).toEqual([33, 10, 10, 10, 3]);
+      expect(payloadCounts.reduce((total, count) => total + count, 0)).toBe(66);
       expect(manager.waitForEmbeddingRetry).not.toHaveBeenCalled();
       expect(manager.markLocalEmbeddingProviderDegraded).not.toHaveBeenCalled();
     },
