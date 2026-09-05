@@ -1,8 +1,15 @@
 // Memory Core tests cover manager provider lifecycle availability behavior.
 import fs from "node:fs/promises";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { hashText } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { describe, expect, it, vi } from "vitest";
+import {
+  closeMemoryDatabase,
+  openMemoryDatabaseAtPath,
+  publishMemoryDatabaseTables,
+  readMemoryDatabaseRevision,
+} from "./manager-db.js";
 import { createManagerIndexFixture } from "./manager-index.test-support.js";
 
 const { closeAllMemorySearchManagers, getMemorySearchManager } = await import("./index.js");
@@ -425,5 +432,88 @@ describe("memory index", () => {
       model: indexedProvider.model,
       provider_key: indexedProviderKey,
     });
+  });
+
+  it("rejects production chunk publication after a full publish changes identity", async () => {
+    const cfg = createCfg({ provider: "openai", model: "generation-old", vectorEnabled: false });
+    const manager = await getFreshManager(cfg, "cli");
+    trackManager(manager);
+    const memoryPath = path.join(fixture.paths.memory, "identity-generation-race.md");
+    const baselineContent = "# Log\nBaseline before a full identity publication.";
+    const content = "# Log\nPending content across a full identity publication.";
+    await fs.writeFile(memoryPath, baselineContent);
+    await manager.sync({ reason: "identity-generation-baseline", force: true });
+    await fs.writeFile(memoryPath, content);
+
+    const fields = manager as unknown as {
+      provider: {
+        embedBatch: (texts: string[]) => Promise<number[][]>;
+      } | null;
+      db: DatabaseSync;
+      indexFile: (
+        entry: {
+          path: string;
+          absPath: string;
+          mtimeMs: number;
+          size: number;
+          hash: string;
+          content: string;
+        },
+        options: { source: "memory"; content: string },
+      ) => Promise<void>;
+    };
+    if (!fields.provider) {
+      throw new Error("Expected a test embedding provider");
+    }
+    let releaseEmbedding = () => {};
+    let markEmbeddingStarted = () => {};
+    const embeddingGate = new Promise<void>((resolve) => {
+      releaseEmbedding = resolve;
+    });
+    const embeddingStarted = new Promise<void>((resolve) => {
+      markEmbeddingStarted = resolve;
+    });
+    fields.provider.embedBatch = async (texts) => {
+      markEmbeddingStarted();
+      await embeddingGate;
+      return texts.map(() => [1, 0, 0, 0]);
+    };
+    const stat = await fs.stat(memoryPath);
+    const indexing = fields.indexFile(
+      {
+        path: "memory/identity-generation-race.md",
+        absPath: memoryPath,
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        hash: hashText(content),
+        content,
+      },
+      { source: "memory", content },
+    );
+    const rejectedIndexing = expect(indexing).rejects.toMatchObject({
+      code: "MEMORY_INDEX_INCREMENTAL_CONFLICT",
+    });
+    await embeddingStarted;
+
+    const shadowPath = path.join(fixture.paths.root, "identity-generation-shadow.sqlite");
+    fields.db.exec(`VACUUM INTO '${shadowPath.replaceAll("'", "''")}'`);
+    const shadow = openMemoryDatabaseAtPath(shadowPath, false);
+    const metaRow = shadow
+      .prepare("SELECT value FROM memory_index_meta WHERE key = 'memory_index_meta_v1'")
+      .get() as { value: string };
+    const meta = JSON.parse(metaRow.value) as Record<string, unknown>;
+    shadow
+      .prepare("UPDATE memory_index_meta SET value = ? WHERE key = 'memory_index_meta_v1'")
+      .run(JSON.stringify({ ...meta, provider: "mock", model: "generation-new" }));
+    closeMemoryDatabase(shadow);
+    await publishMemoryDatabaseTables({
+      targetDb: fields.db,
+      sourcePath: shadowPath,
+      metaKey: "memory_index_meta_v1",
+      expectedRevision: readMemoryDatabaseRevision(fields.db),
+    });
+
+    releaseEmbedding();
+    await rejectedIndexing;
   });
 });

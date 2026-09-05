@@ -46,7 +46,7 @@ import {
 import {
   assertMemoryIndexIncrementalCommitCurrent,
   MemoryIndexIncrementalConflictError,
-  readMemoryDatabaseRevision,
+  readMemoryIndexGenerationSnapshot,
 } from "./manager-db.js";
 import {
   collectMemoryCachedEmbeddings,
@@ -65,6 +65,7 @@ import {
   runMemoryEmbeddingRetryLoop,
 } from "./manager-embedding-policy.js";
 import { deleteMemoryFtsRows } from "./manager-fts-state.js";
+import { acquireMemoryIndexReadGeneration } from "./manager-index-generation-lease.js";
 import {
   resolveMemoryIndexProviderIdentities,
   type MemoryIndexProviderIdentity,
@@ -120,6 +121,7 @@ type PreparedMemoryIndexEntry = {
   entry: MemoryIndexEntry;
   source: MemorySource;
   revisionAtPrepare: number;
+  identityAtPrepare: string | null;
   sourceHashAtPrepare: string | null;
   chunks: IndexedMemoryChunk[];
   structuredInputBytes?: number;
@@ -947,6 +949,7 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       path: prepared.entry.path,
       source: prepared.source,
       revisionAtPrepare: prepared.revisionAtPrepare,
+      identityAtPrepare: prepared.identityAtPrepare,
       sourceHashAtPrepare: prepared.sourceHashAtPrepare,
     });
   }
@@ -960,7 +963,14 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
   }
 
   private async writeChunks(
-    { entry, source, revisionAtPrepare, sourceHashAtPrepare, chunks }: PreparedMemoryIndexEntry,
+    {
+      entry,
+      source,
+      revisionAtPrepare,
+      identityAtPrepare,
+      sourceHashAtPrepare,
+      chunks,
+    }: PreparedMemoryIndexEntry,
     generation: MemorySyncProviderGeneration | null,
     embeddings: number[][],
     vectorReady: boolean,
@@ -980,31 +990,44 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       const model = generation?.provider?.model ?? "fts-only";
       const needsVectorRebuild =
         !vectorReady && embeddings.some((embedding) => embedding.length > 0);
-      runSqliteImmediateTransactionSync(this.db, () => {
-        this.assertIncrementalCommitCurrent(
-          { entry, source, chunks, revisionAtPrepare, sourceHashAtPrepare },
-          generation,
-        );
-        if (source === "sessions") {
-          const sessionId = expectDefined(entry.sessionId, "memory index session identity");
-          // Embedding and vector setup may await while a purge completes. Read the
-          // live owner, never the shadow index, immediately before publishing.
-          if (hasMemorySessionTombstone(generation?.database ?? this.db, this.agentId, sessionId)) {
-            this.markFailedFullReindexRetry({ memory: false, sessions: true });
-            throw new Error(
-              "A session was forgotten while memory indexing was running; retry the memory index.",
-            );
-          }
-        }
-        this.clearIndexedFileData(entry.path, source);
-        for (const [i, chunk] of chunks.entries()) {
-          const embedding = embeddings[i] ?? [];
-          const id = hashText(
-            `${source}:${entry.path}:${chunk.startLine}:${chunk.endLine}:${chunk.hash}:${model}`,
+      const releaseGeneration = await acquireMemoryIndexReadGeneration(
+        this.settings.store.databasePath,
+      );
+      try {
+        runSqliteImmediateTransactionSync(this.db, () => {
+          this.assertIncrementalCommitCurrent(
+            {
+              entry,
+              source,
+              chunks,
+              revisionAtPrepare,
+              identityAtPrepare,
+              sourceHashAtPrepare,
+            },
+            generation,
           );
-          this.db
-            .prepare(
-              `INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
+          if (source === "sessions") {
+            const sessionId = expectDefined(entry.sessionId, "memory index session identity");
+            // Embedding and vector setup may await while a purge completes. Read the
+            // live owner, never the shadow index, immediately before publishing.
+            if (
+              hasMemorySessionTombstone(generation?.database ?? this.db, this.agentId, sessionId)
+            ) {
+              this.markFailedFullReindexRetry({ memory: false, sessions: true });
+              throw new Error(
+                "A session was forgotten while memory indexing was running; retry the memory index.",
+              );
+            }
+          }
+          this.clearIndexedFileData(entry.path, source);
+          for (const [i, chunk] of chunks.entries()) {
+            const embedding = embeddings[i] ?? [];
+            const id = hashText(
+              `${source}:${entry.path}:${chunk.startLine}:${chunk.endLine}:${chunk.hash}:${model}`,
+            );
+            this.db
+              .prepare(
+                `INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  hash=excluded.hash,
@@ -1012,38 +1035,38 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
                  text=excluded.text,
                  embedding=excluded.embedding,
                  updated_at=excluded.updated_at`,
-            )
-            .run(
-              id,
-              entry.path,
-              source,
-              chunk.startLine,
-              chunk.endLine,
-              chunk.hash,
-              model,
-              chunk.text,
-              JSON.stringify(embedding),
-              now,
-            );
-          this.db
-            .prepare(
-              `INSERT INTO ${MEMORY_INDEX_CHUNK_RECALL_METADATA_TABLE} (
+              )
+              .run(
+                id,
+                entry.path,
+                source,
+                chunk.startLine,
+                chunk.endLine,
+                chunk.hash,
+                model,
+                chunk.text,
+                JSON.stringify(embedding),
+                now,
+              );
+            this.db
+              .prepare(
+                `INSERT INTO ${MEMORY_INDEX_CHUNK_RECALL_METADATA_TABLE} (
                  chunk_id, importance, triggers, project_key
                ) VALUES (?, ?, ?, ?)
                ON CONFLICT(chunk_id) DO UPDATE SET
                  importance=excluded.importance,
                  triggers=excluded.triggers,
                  project_key=excluded.project_key`,
-            )
-            .run(id, chunk.importance, chunk.triggers, chunk.projectKey);
-          const provenance = chunk.provenance ?? {
-            originClass: "untrusted" as const,
-            sessionKind: "unknown" as const,
-            observedAt: now,
-          };
-          this.db
-            .prepare(
-              `INSERT INTO ${MEMORY_INDEX_CHUNK_PROVENANCE_TABLE} (
+              )
+              .run(id, chunk.importance, chunk.triggers, chunk.projectKey);
+            const provenance = chunk.provenance ?? {
+              originClass: "untrusted" as const,
+              sessionKind: "unknown" as const,
+              observedAt: now,
+            };
+            this.db
+              .prepare(
+                `INSERT INTO ${MEMORY_INDEX_CHUNK_PROVENANCE_TABLE} (
                  chunk_id, origin_class, session_kind, observed_at, supersedes_key
                ) VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(chunk_id) DO UPDATE SET
@@ -1051,48 +1074,51 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
                  session_kind=excluded.session_kind,
                  observed_at=excluded.observed_at,
                  supersedes_key=excluded.supersedes_key`,
-            )
-            .run(
-              id,
-              provenance.originClass,
-              provenance.sessionKind,
-              provenance.observedAt,
-              provenance.supersedesKey ?? null,
-            );
-          if (vectorReady && embedding.length > 0) {
-            replaceMemoryVectorRow({
-              db: this.db,
-              tableName: VECTOR_TABLE,
-              id,
-              embedding,
-            });
-          }
-          if (this.fts.enabled && this.fts.available) {
-            this.db
-              .prepare(
-                `INSERT INTO ${FTS_TABLE} (text, id, path, source, model, start_line, end_line)\n` +
-                  ` VALUES (?, ?, ?, ?, ?, ?, ?)`,
               )
-              .run(chunk.text, id, entry.path, source, model, chunk.startLine, chunk.endLine);
+              .run(
+                id,
+                provenance.originClass,
+                provenance.sessionKind,
+                provenance.observedAt,
+                provenance.supersedesKey ?? null,
+              );
+            if (vectorReady && embedding.length > 0) {
+              replaceMemoryVectorRow({
+                db: this.db,
+                tableName: VECTOR_TABLE,
+                id,
+                embedding,
+              });
+            }
+            if (this.fts.enabled && this.fts.available) {
+              this.db
+                .prepare(
+                  `INSERT INTO ${FTS_TABLE} (text, id, path, source, model, start_line, end_line)\n` +
+                    ` VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                )
+                .run(chunk.text, id, entry.path, source, model, chunk.startLine, chunk.endLine);
+            }
           }
-        }
-        upsertMemoryEmbeddingCache({
-          db: this.db,
-          enabled: this.cache.enabled,
-          provider: generation?.provider ?? null,
-          providerKey: generation?.providerKey ?? null,
-          entries: chunks.map((chunk, index) => ({
-            hash: chunk.hash,
-            embedding: embeddings[index] ?? [],
-          })),
-          now,
-          tableName: EMBEDDING_CACHE_TABLE,
+          upsertMemoryEmbeddingCache({
+            db: this.db,
+            enabled: this.cache.enabled,
+            provider: generation?.provider ?? null,
+            providerKey: generation?.providerKey ?? null,
+            entries: chunks.map((chunk, index) => ({
+              hash: chunk.hash,
+              embedding: embeddings[index] ?? [],
+            })),
+            now,
+            tableName: EMBEDDING_CACHE_TABLE,
+          });
+          this.upsertFileRecord(entry, source);
+          if (needsVectorRebuild) {
+            this.markVectorRebuildRequired();
+          }
         });
-        this.upsertFileRecord(entry, source);
-        if (needsVectorRebuild) {
-          this.markVectorRebuildRequired();
-        }
-      });
+      } finally {
+        releaseGeneration();
+      }
       this.database.vectorDegradedWriteWarningShown = logMemoryVectorDegradedWrite({
         vectorEnabled: this.vector.enabled,
         vectorReady,
@@ -1110,7 +1136,7 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
     generation: MemorySyncProviderGeneration | null,
   ): Promise<PreparedMemoryIndexEntry | null> {
     return await withMemoryWorkspaceLock(this.workspaceDir, async () => {
-      const revisionAtPrepare = readMemoryDatabaseRevision(this.db);
+      const generationAtPrepare = readMemoryIndexGenerationSnapshot(this.db);
       const sourceRow = this.db
         .prepare("SELECT hash FROM memory_index_sources WHERE path = ? AND source = ?")
         // SAFETY: SQLite rows are untyped; the source hash is validated below.
@@ -1143,7 +1169,8 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
         return {
           entry,
           source: options.source,
-          revisionAtPrepare,
+          revisionAtPrepare: generationAtPrepare.revision,
+          identityAtPrepare: generationAtPrepare.identity,
           sourceHashAtPrepare,
           chunks: [chunk],
           structuredInputBytes: multimodalChunk.structuredInputBytes,
@@ -1212,7 +1239,14 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       if (options.source === "sessions" && "lineMap" in entry) {
         remapChunkLines(chunks, entry.lineMap);
       }
-      return { entry, source: options.source, revisionAtPrepare, sourceHashAtPrepare, chunks };
+      return {
+        entry,
+        source: options.source,
+        revisionAtPrepare: generationAtPrepare.revision,
+        identityAtPrepare: generationAtPrepare.identity,
+        sourceHashAtPrepare,
+        chunks,
+      };
     });
   }
 

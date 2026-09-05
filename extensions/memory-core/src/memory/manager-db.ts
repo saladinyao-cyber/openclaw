@@ -137,23 +137,51 @@ export class MemorySearchIndexNotReadyError extends Error {
   }
 }
 
+export type MemoryIndexGenerationSnapshot = {
+  revision: number;
+  identity: string | null;
+};
+
+export function readMemoryIndexGenerationSnapshot(db: DatabaseSync): MemoryIndexGenerationSnapshot {
+  const row = db
+    .prepare("SELECT value FROM memory_index_meta WHERE key = 'memory_index_meta_v1'")
+    // SAFETY: SQLite rows are untyped; only a guarded string is retained as the identity token.
+    .get() as { value?: unknown } | undefined;
+  return {
+    revision: readMemoryDatabaseRevision(db),
+    identity: typeof row?.value === "string" ? row.value : null,
+  };
+}
+
 export function assertMemoryIndexIncrementalCommitCurrent(params: {
   db: DatabaseSync;
   path: string;
   source: "memory" | "sessions";
   revisionAtPrepare: number;
+  identityAtPrepare: string | null;
   sourceHashAtPrepare: string | null;
 }): void {
-  const liveRevision = readMemoryDatabaseRevision(params.db);
+  const liveGeneration = readMemoryIndexGenerationSnapshot(params.db);
   const row = params.db
     .prepare("SELECT hash FROM memory_index_sources WHERE path = ? AND source = ?")
     // SAFETY: SQLite rows are untyped; the hash is validated below.
     .get(params.path, params.source) as { hash?: unknown } | undefined;
   const liveSourceHash = typeof row?.hash === "string" ? row.hash : null;
-  if (liveSourceHash !== params.sourceHashAtPrepare) {
+  // The revision also advances for unrelated source writes, so it is not a
+  // standalone per-file CAS. Paired with persisted identity it distinguishes a
+  // full publication from a concurrent write to another source.
+  const revisionChanged = liveGeneration.revision !== params.revisionAtPrepare;
+  const identityChanged = liveGeneration.identity !== params.identityAtPrepare;
+  const publishedGenerationChanged = revisionChanged && identityChanged;
+  const identityChangedWithoutRevision = !revisionChanged && identityChanged;
+  if (
+    liveSourceHash !== params.sourceHashAtPrepare ||
+    publishedGenerationChanged ||
+    identityChangedWithoutRevision
+  ) {
     throw new MemoryIndexIncrementalConflictError(
       `Memory index source ${params.path} changed before commit ` +
-        `(planned at revision ${params.revisionAtPrepare}, found ${liveRevision}); retry the incremental sync.`,
+        `(planned at revision ${params.revisionAtPrepare}, found ${liveGeneration.revision}); retry the incremental sync.`,
     );
   }
 }

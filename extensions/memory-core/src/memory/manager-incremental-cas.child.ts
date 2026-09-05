@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { runSqliteImmediateTransactionSync } from "openclaw/plugin-sdk/sqlite-runtime";
 import {
   assertMemoryIndexIncrementalCommitCurrent,
-  readMemoryDatabaseRevision,
+  readMemoryIndexGenerationSnapshot,
 } from "./manager-db.js";
 
 const [dbPath, nextHash] = process.argv.slice(2);
@@ -12,7 +12,7 @@ if (!dbPath || !nextHash || !process.send) {
 
 const db = new DatabaseSync(dbPath);
 db.exec("PRAGMA busy_timeout = 5000");
-const revisionAtPrepare = readMemoryDatabaseRevision(db);
+const generationAtPrepare = readMemoryIndexGenerationSnapshot(db);
 const row = db
   .prepare("SELECT hash FROM memory_index_sources WHERE path = 'MEMORY.md' AND source = 'memory'")
   // SAFETY: the parent fixture inserts this exact required row before spawning both children.
@@ -26,7 +26,8 @@ process.once("message", () => {
         db,
         path: "MEMORY.md",
         source: "memory",
-        revisionAtPrepare,
+        revisionAtPrepare: generationAtPrepare.revision,
+        identityAtPrepare: generationAtPrepare.identity,
         sourceHashAtPrepare: row.hash,
       });
       db.prepare(

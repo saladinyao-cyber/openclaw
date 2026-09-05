@@ -22,6 +22,7 @@ import {
 } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { configureMemoryCoreDreamingStateForTests } from "../test-helpers.js";
 import {
   SessionStartupCatchupHarness,
   emitSessionTranscriptUpdate,
@@ -38,6 +39,7 @@ describe("session startup catch-up", () => {
   beforeEach(async () => {
     stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-session-startup-"));
     setStartupStateDir(stateDir);
+    await configureMemoryCoreDreamingStateForTests();
     resetTranscriptUpdateListener();
   });
 

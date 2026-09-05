@@ -3,7 +3,10 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { resolveSessionTranscriptsDirForAgent } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import { listSessionTranscriptCorpusEntriesForAgent } from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
-import type { MemorySessionSyncTarget } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import {
+  hashText,
+  type MemorySessionSyncTarget,
+} from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { deleteSessionEntry, upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { appendSessionTranscriptMessageByIdentity } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { resolveOpenClawAgentSqlitePath } from "openclaw/plugin-sdk/sqlite-runtime";
@@ -23,6 +26,68 @@ describe("memory session update sync", () => {
     closeAllMemorySearchManagers,
   });
   const { createConfig, getFreshManager, seedSessionTranscript } = fixture;
+
+  it("does not stale-delete a memory path reindexed after source planning", async () => {
+    const cfg = createConfig({
+      provider: "none",
+      vectorEnabled: false,
+      sources: ["memory"],
+    });
+    const manager = await getFreshManager(cfg, "cli");
+    const memoryPath = path.join(fixture.paths.workspace, "MEMORY.md");
+    await fs.writeFile(memoryPath, "# Memory\nOriginal stale-delete candidate.\n");
+    await manager.sync({ reason: "stale-delete-baseline", force: true });
+
+    const fields = manager as unknown as {
+      db: DatabaseSync;
+      syncMemoryFiles: (params: {
+        needsFullReindex: boolean;
+        deferIndex: boolean;
+      }) => Promise<{ finalize: () => Promise<void> | void }>;
+      indexFile: (
+        entry: {
+          path: string;
+          absPath: string;
+          mtimeMs: number;
+          size: number;
+          hash: string;
+          content: string;
+        },
+        options: { source: "memory"; content: string },
+      ) => Promise<void>;
+    };
+    await fs.unlink(memoryPath);
+    const stalePlan = await fields.syncMemoryFiles({
+      needsFullReindex: false,
+      deferIndex: true,
+    });
+
+    const replacement = "# Memory\nReplacement survives stale cleanup.\n";
+    await fs.writeFile(memoryPath, replacement);
+    const stat = await fs.stat(memoryPath);
+    await fields.indexFile(
+      {
+        path: "MEMORY.md",
+        absPath: memoryPath,
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        hash: hashText(replacement),
+        content: replacement,
+      },
+      { source: "memory", content: replacement },
+    );
+    await stalePlan.finalize();
+
+    expect(
+      fields.db.prepare("SELECT hash FROM memory_index_sources WHERE path = 'MEMORY.md'").get(),
+    ).toEqual({ hash: hashText(replacement) });
+    expect(
+      fields.db.prepare("SELECT text FROM memory_index_chunks WHERE path = 'MEMORY.md'").get(),
+    ).toEqual({ text: expect.stringContaining("Replacement survives stale cleanup") });
+    expect(
+      fields.db.prepare("SELECT path FROM memory_index_chunks_fts WHERE path = 'MEMORY.md'").get(),
+    ).toEqual({ path: "MEMORY.md" });
+  });
 
   function seedIndexedSession(database: DatabaseSync, sessionPath: string, text: string): void {
     database

@@ -9,6 +9,9 @@ import {
   MEMORY_INDEX_FTS_TABLE,
   runWithConcurrency,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import { runSqliteImmediateTransactionSync } from "openclaw/plugin-sdk/sqlite-runtime";
+import { withMemoryWorkspaceLock } from "../memory-workspace-lock.js";
+import { MemoryIndexIncrementalConflictError } from "./manager-db.js";
 import { MemoryManagerSessionSyncOps } from "./manager-session-sync-ops.js";
 import {
   isMemorySessionIndexable,
@@ -18,6 +21,7 @@ import {
   loadMemorySourceFileState,
   resolveMemorySourceFileEntries,
   resolveMemorySourceExistingHash,
+  type MemorySourceFileStateRow,
 } from "./manager-source-state.js";
 import type {
   MemoryIndexEntry,
@@ -30,6 +34,20 @@ const FTS_TABLE = MEMORY_INDEX_FTS_TABLE;
 const SESSION_SYNC_YIELD_EVERY = 10;
 const SOURCE_WIDE_SESSION_INDEX_FLUSH_FILES = 128;
 const log = createSubsystemLogger("memory");
+
+function assertSourceRowStillCurrent(
+  live: MemorySourceFileStateRow | undefined,
+  expected: MemorySourceFileStateRow,
+): void {
+  if (!live) {
+    return;
+  }
+  if (live.hash !== expected.hash || live.mtime !== expected.mtime || live.size !== expected.size) {
+    throw new MemoryIndexIncrementalConflictError(
+      `Memory index source ${expected.path} changed before stale cleanup; retry the incremental sync.`,
+    );
+  }
+}
 
 function createSessionSyncYield(total: number): () => Promise<void> {
   let completed = 0;
@@ -88,19 +106,41 @@ export abstract class MemoryManagerSourceSyncOps extends MemoryManagerSessionSyn
     }
 
     const deleteStaleRows = async () => {
-      for (const stale of existingRows) {
-        if (activePaths.has(stale.path)) {
-          continue;
-        }
-        deleteFileByPathAndSource.run(stale.path, "memory");
-        this.deleteVectorRowsForSource(stale.path, "memory");
-        deleteChunksByPathAndSource.run(stale.path, "memory");
-        if (deleteFtsRowsByPathAndSource) {
-          try {
-            deleteFtsRowsByPathAndSource.run(stale.path, "memory");
-          } catch {}
-        }
-      }
+      await withMemoryWorkspaceLock(this.workspaceDir, async () => {
+        // Re-resolve the source while excluding other workspace writers. A path
+        // recreated after the original scan must never be deleted as stale.
+        const latestActivePaths = new Set(
+          (
+            await resolveMemorySourceFileEntries({
+              workspaceDir: this.workspaceDir,
+              settings: this.settings,
+              concurrency: this.getIndexConcurrency(),
+            })
+          ).map((entry) => entry.path),
+        );
+        runSqliteImmediateTransactionSync(this.db, () => {
+          const liveState = new Map(
+            loadMemorySourceFileState({ db: this.db, source: "memory" }).rows.map((row) => [
+              row.path,
+              row,
+            ]),
+          );
+          for (const stale of existingRows) {
+            if (activePaths.has(stale.path) || latestActivePaths.has(stale.path)) {
+              continue;
+            }
+            const live = liveState.get(stale.path);
+            assertSourceRowStillCurrent(live, stale);
+            if (!live) {
+              continue;
+            }
+            deleteFileByPathAndSource.run(stale.path, "memory");
+            this.deleteVectorRowsForSource(stale.path, "memory");
+            deleteChunksByPathAndSource.run(stale.path, "memory");
+            deleteFtsRowsByPathAndSource?.run(stale.path, "memory");
+          }
+        });
+      });
     };
 
     if (this.batch.enabled) {
@@ -229,59 +269,78 @@ export abstract class MemoryManagerSourceSyncOps extends MemoryManagerSessionSyn
       deleteFileByPathAndSource.run(memoryPath, "sessions");
       this.deleteVectorRowsForSource(memoryPath, "sessions");
       deleteChunksByPathAndSource.run(memoryPath, "sessions");
-      if (deleteFtsRowsByPathAndSource) {
-        try {
-          deleteFtsRowsByPathAndSource.run(memoryPath, "sessions");
-        } catch {}
-      }
+      deleteFtsRowsByPathAndSource?.run(memoryPath, "sessions");
     };
     const deleteStaleRows = async () => {
       if (activePaths === null) {
         return;
       }
 
-      const staleRows = existingRows ?? [];
-      const yieldAfterStaleSessionRow = createSessionSyncYield(staleRows.length);
-      for (const stale of staleRows) {
-        try {
-          if (activePaths.has(stale.path)) {
-            continue;
+      await withMemoryWorkspaceLock(this.workspaceDir, async () => {
+        const latestActivePaths = new Set(
+          (await this.listSessionCorpusEntries()).map((entry) =>
+            this.sessionPathForCorpusEntry(entry),
+          ),
+        );
+        const staleRows = existingRows ?? [];
+        runSqliteImmediateTransactionSync(this.db, () => {
+          const liveState = new Map(
+            loadMemorySourceFileState({ db: this.db, source: "sessions" }).rows.map((row) => [
+              row.path,
+              row,
+            ]),
+          );
+          for (const stale of staleRows) {
+            if (activePaths.has(stale.path) || latestActivePaths.has(stale.path)) {
+              continue;
+            }
+            const live = liveState.get(stale.path);
+            assertSourceRowStillCurrent(live, stale);
+            if (live) {
+              deleteIndexedSessionPath(stale.path);
+            }
           }
-          deleteIndexedSessionPath(stale.path);
-        } finally {
-          await yieldAfterStaleSessionRow();
-        }
-      }
+        });
+      });
     };
-    const deleteTargetArchiveStaleLiveRows = () => {
+    const deleteTargetArchiveStaleLiveRows = async () => {
       if (!targetArchiveFiles) {
         return;
       }
-      const activeCorpusPaths = new Set(
-        corpusEntries
-          .filter((entry) => entry.artifactKind === "active-session")
-          .map((entry) => this.sessionPathForCorpusEntry(entry)),
-      );
-      const existingSessionPaths = new Set(
-        loadMemorySourceFileState({
-          db: this.db,
-          source: "sessions",
-        }).rows.map((row) => row.path),
-      );
-      for (const file of targetArchiveFiles) {
-        const corpusEntry = corpusEntryForPath(file);
-        const staleAgentId = corpusEntry.agentId;
-        const staleLivePaths = [
-          sessionPathForSessionIdentity(staleAgentId, corpusEntry.sessionId),
-          this.legacyExtensionlessSessionPathForIdentity(staleAgentId, corpusEntry.sessionId),
-        ];
-        for (const staleLivePath of staleLivePaths) {
-          if (activeCorpusPaths.has(staleLivePath) || !existingSessionPaths.has(staleLivePath)) {
-            continue;
+      await withMemoryWorkspaceLock(this.workspaceDir, async () => {
+        // Targeted sync owns one resolved corpus snapshot; do not enumerate a
+        // different session store while finalizing that same target.
+        const activeCorpusPaths = new Set(
+          corpusEntries
+            .filter((entry) => entry.artifactKind === "active-session")
+            .map((entry) => this.sessionPathForCorpusEntry(entry)),
+        );
+        runSqliteImmediateTransactionSync(this.db, () => {
+          const existingSessionPaths = new Set(
+            loadMemorySourceFileState({
+              db: this.db,
+              source: "sessions",
+            }).rows.map((row) => row.path),
+          );
+          for (const file of targetArchiveFiles) {
+            const corpusEntry = corpusEntryForPath(file);
+            const staleAgentId = corpusEntry.agentId;
+            const staleLivePaths = [
+              sessionPathForSessionIdentity(staleAgentId, corpusEntry.sessionId),
+              this.legacyExtensionlessSessionPathForIdentity(staleAgentId, corpusEntry.sessionId),
+            ];
+            for (const staleLivePath of staleLivePaths) {
+              if (
+                activeCorpusPaths.has(staleLivePath) ||
+                !existingSessionPaths.has(staleLivePath)
+              ) {
+                continue;
+              }
+              deleteIndexedSessionPath(staleLivePath);
+            }
           }
-          deleteIndexedSessionPath(staleLivePath);
-        }
-      }
+        });
+      });
     };
     const resolveSessionIndexEntry = async (absPath: string): Promise<MemoryIndexEntry | null> => {
       if (!indexAll && !this.sessionsDirtyFiles.has(absPath)) {
@@ -361,7 +420,7 @@ export abstract class MemoryManagerSourceSyncOps extends MemoryManagerSessionSyn
       }
 
       await flushPendingIndexItems();
-      deleteTargetArchiveStaleLiveRows();
+      await deleteTargetArchiveStaleLiveRows();
       await deleteStaleRows();
       return this.emptySourceSyncPlan();
     }
@@ -383,7 +442,7 @@ export abstract class MemoryManagerSourceSyncOps extends MemoryManagerSessionSyn
     });
     await runWithConcurrency(tasks, this.getIndexConcurrency());
 
-    deleteTargetArchiveStaleLiveRows();
+    await deleteTargetArchiveStaleLiveRows();
     await deleteStaleRows();
     return this.emptySourceSyncPlan();
   }

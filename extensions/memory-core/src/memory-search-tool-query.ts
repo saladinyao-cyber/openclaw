@@ -1,5 +1,5 @@
 // Memory Core plugin module owns ranked search-window filtering and diagnostics.
-import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { extractErrorCode, formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
   formatMemoryIndexRebuildGuidance,
   resolveMemoryIndexIdentityDiagnostic,
@@ -56,7 +56,10 @@ type MemorySearchToolVisibility = {
   sandboxed: boolean;
 };
 
-function isClosedMemoryStoreError(error: unknown): boolean {
+function isRefreshableMemoryStoreError(error: unknown): boolean {
+  if (extractErrorCode(error) === "MEMORY_INDEX_NOT_READY") {
+    return true;
+  }
   const message = formatErrorMessage(error).toLowerCase();
   return (
     message.includes("database is not open") ||
@@ -120,7 +123,7 @@ export async function executeMemorySearchToolQuery(params: {
   try {
     searched = await searchOnce();
   } catch (error) {
-    if (!isClosedMemoryStoreError(error)) {
+    if (!isRefreshableMemoryStoreError(error)) {
       throw error;
     }
     const refreshed = await params.refreshManager();

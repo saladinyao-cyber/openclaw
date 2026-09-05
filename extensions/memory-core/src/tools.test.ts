@@ -529,6 +529,43 @@ describe("memory_search unavailable payloads", () => {
     expect(getMemoryCloseMockCalls()).toBe(0);
   });
 
+  it("re-resolves the manager once when the published generation changes", async () => {
+    let searchCalls = 0;
+    setMemorySearchImpl(async () => {
+      searchCalls += 1;
+      if (searchCalls === 1) {
+        throw Object.assign(new Error("memory index generation changed"), {
+          code: "MEMORY_INDEX_NOT_READY",
+        });
+      }
+      return [
+        {
+          path: "MEMORY.md",
+          startLine: 1,
+          endLine: 1,
+          score: 0.9,
+          snippet: "Fresh generation codename: AURORA-31.",
+          source: "memory" as const,
+        },
+      ];
+    });
+
+    const tool = createMemorySearchToolOrThrow({
+      config: {
+        agents: { list: [{ id: "main", default: true }] },
+        memory: { citations: "off" },
+      },
+    });
+    const result = await tool.execute("generation-refresh", { query: "fresh generation" });
+
+    expect((result.details as { results?: Array<{ snippet: string }> }).results).toEqual([
+      expect.objectContaining({ snippet: "Fresh generation codename: AURORA-31." }),
+    ]);
+    expect(searchCalls).toBe(2);
+    expect(getMemorySearchManagerMockCalls()).toBe(2);
+    expect(getMemoryCloseMockCalls()).toBe(0);
+  });
+
   it("re-resolves and closes one-shot CLI managers when a cached sqlite handle was closed", async () => {
     let searchCalls = 0;
     setMemorySearchImpl(async () => {

@@ -23,6 +23,7 @@ import { MemoryIndexDatabase } from "./manager-database-context.js";
 import {
   cleanupAgedMemoryReindexTempFiles,
   closeMemoryDatabase,
+  MemoryIndexIncrementalConflictError,
   openMemoryDatabaseAtPath,
   publishMemoryDatabaseTables,
   readMemoryDatabaseRevision,
@@ -200,28 +201,46 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
         : this.providerKey;
       const syncProviderIdentities =
         this.syncProviderGeneration?.identities ?? this.resolveProviderIndexIdentities();
-      const indexIdentity = resolveMemoryIndexIdentityState({
-        meta,
-        // Also detects provider→FTS-only transitions so orphaned old-model FTS rows are cleaned up.
-        provider: syncProvider ? { id: syncProvider.id, model: syncProvider.model } : null,
-        providerKey: syncProviderKey ?? undefined,
-        providerAliases: syncProviderIdentities.slice(1),
-        configuredSources: resolveConfiguredSourcesForMeta(this.sources),
-        configuredScopeHash: resolveConfiguredScopeHash({
-          workspaceDir: this.workspaceDir,
-          extraPaths: this.settings.extraPaths,
-          multimodal: {
-            enabled: this.settings.multimodal.enabled,
-            modalities: this.settings.multimodal.modalities,
-            maxFileBytes: this.settings.multimodal.maxFileBytes,
-          },
-        }),
-        chunkTokens: this.settings.chunking.tokens,
-        chunkOverlap: this.settings.chunking.overlap,
-        vectorReady,
-        hasIndexedChunks: this.hasIndexedChunks(),
-        ftsTokenizer: this.settings.store.fts.tokenizer,
-      });
+      const resolveCurrentSyncIndexIdentity = () =>
+        resolveMemoryIndexIdentityState({
+          meta: this.readMeta(),
+          // Also detects provider→FTS-only transitions so orphaned old-model FTS rows are cleaned up.
+          provider: syncProvider ? { id: syncProvider.id, model: syncProvider.model } : null,
+          providerKey: syncProviderKey ?? undefined,
+          providerAliases: syncProviderIdentities.slice(1),
+          configuredSources: resolveConfiguredSourcesForMeta(this.sources),
+          configuredScopeHash: resolveConfiguredScopeHash({
+            workspaceDir: this.workspaceDir,
+            extraPaths: this.settings.extraPaths,
+            multimodal: {
+              enabled: this.settings.multimodal.enabled,
+              modalities: this.settings.multimodal.modalities,
+              maxFileBytes: this.settings.multimodal.maxFileBytes,
+            },
+          }),
+          chunkTokens: this.settings.chunking.tokens,
+          chunkOverlap: this.settings.chunking.overlap,
+          vectorReady,
+          hasIndexedChunks: this.hasIndexedChunks(),
+          ftsTokenizer: this.settings.store.fts.tokenizer,
+        });
+      const indexIdentity = resolveCurrentSyncIndexIdentity();
+      const revisionAtIdentityPreflight = readMemoryDatabaseRevision(this.db);
+      const assertIncrementalIdentityCurrent = () => {
+        const liveRevision = readMemoryDatabaseRevision(this.db);
+        const liveIdentity = resolveCurrentSyncIndexIdentity();
+        if (liveRevision !== revisionAtIdentityPreflight || liveIdentity.status !== "valid") {
+          const identityDetail =
+            liveIdentity.status === "valid"
+              ? "identity remained valid"
+              : `${liveIdentity.status}: ${liveIdentity.reason}`;
+          throw new MemoryIndexIncrementalConflictError(
+            `Memory index generation changed before incremental commit ` +
+              `(planned at revision ${revisionAtIdentityPreflight}, found ${liveRevision}; ` +
+              `${identityDetail}); retry the sync.`,
+          );
+        }
+      };
       const hasIndexedChunks = this.hasIndexedChunks();
       const needsInitialIndex = indexIdentity.status !== "valid" && !hasIndexedChunks;
       // Missing metadata cannot prove whether existing chunks were semantic.
@@ -279,8 +298,9 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
         const targetedSessionSync = await withMemoryReindexLock(
           resolveUserPath(this.settings.store.databasePath),
           "shared",
-          async () =>
-            await runMemoryTargetedSessionSync({
+          async () => {
+            assertIncrementalIdentityCurrent();
+            return await runMemoryTargetedSessionSync({
               hasSessionSource: this.sources.has("sessions"),
               targetArchiveFiles,
               reason: params?.reason,
@@ -299,7 +319,8 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
                 this.endSyncProviderGeneration();
                 return await this.activateFallbackProvider(reason);
               },
-            }),
+            });
+          },
         );
         if (targetedSessionSync.handled) {
           this.sessionsDirty = targetedSessionSync.sessionsDirty;
@@ -325,6 +346,11 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
               });
               return;
             }
+
+            // Identity was first inspected before admission. Re-read persisted
+            // metadata only after the shared lease is held so a completed full
+            // publication cannot be followed by writes from its old provider.
+            assertIncrementalIdentityCurrent();
 
             const shouldSyncMemory = this.sources.has("memory") && this.dirty;
             const shouldSyncSessions = this.shouldSyncSessions(params, needsFullReindex);

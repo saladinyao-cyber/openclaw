@@ -77,6 +77,15 @@ function createStartupHarnessDatabase(sourceRows: SourceStateRow[]): DatabaseSyn
       source TEXT NOT NULL,
       model TEXT NOT NULL
     );
+    CREATE TABLE memory_index_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      revision INTEGER NOT NULL
+    );
+    INSERT INTO memory_index_state (id, revision) VALUES (1, 0);
+    CREATE TABLE memory_index_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
     CREATE TABLE memory_index_source_update_audit (path TEXT NOT NULL);
     CREATE TRIGGER memory_index_source_update_audit_trigger
     AFTER UPDATE ON memory_index_sources

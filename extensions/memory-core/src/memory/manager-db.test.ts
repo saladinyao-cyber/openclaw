@@ -20,6 +20,7 @@ import {
   openMemoryDatabaseAtPath,
   publishMemoryDatabaseTables,
   readMemoryDatabaseRevision,
+  readMemoryIndexGenerationSnapshot,
   MemoryIndexRevisionConflictError,
   resetMemoryDatabase,
 } from "./manager-db.js";
@@ -117,10 +118,11 @@ describe("memory manager database publication", () => {
         child.send("commit");
       }
       const settled = await Promise.all(outcomes);
-      expect(settled.map((message) => message.outcome).toSorted()).toEqual([
-        "committed",
-        "conflict",
-      ]);
+      expect(
+        settled
+          .map((message) => message.outcome)
+          .toSorted((a, b) => String(a).localeCompare(String(b))),
+      ).toEqual(["committed", "conflict"]);
       expect(settled.find((message) => message.outcome === "conflict")?.code).toBe(
         "MEMORY_INDEX_INCREMENTAL_CONFLICT",
       );
@@ -131,7 +133,7 @@ describe("memory manager database publication", () => {
     }
   });
 
-  it("accepts an unrelated revision advance when the planned source hash is unchanged", () => {
+  it("accepts an unrelated source update when the generation and planned hash are unchanged", () => {
     const db = new DatabaseSync(path.join(fixtureRoot, "incremental-unrelated.sqlite"));
     try {
       ensureTestMemorySchema(db);
@@ -139,6 +141,7 @@ describe("memory manager database publication", () => {
         "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
       ).run("MEMORY.md", "memory", "initial", 1, 1);
       const revisionAtPrepare = readMemoryDatabaseRevision(db);
+      const identityAtPrepare = readMemoryIndexGenerationSnapshot(db).identity;
       db.prepare(
         "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
       ).run("memory/other.md", "memory", "other", 1, 1);
@@ -148,6 +151,7 @@ describe("memory manager database publication", () => {
           path: "MEMORY.md",
           source: "memory",
           revisionAtPrepare,
+          identityAtPrepare,
           sourceHashAtPrepare: "initial",
         }),
       ).not.toThrow();
