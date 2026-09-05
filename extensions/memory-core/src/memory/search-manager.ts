@@ -1,5 +1,5 @@
 // Memory Core plugin module owns builtin search manager acquisition and cleanup.
-import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { extractErrorCode, formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import type { MemorySearchManager } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
@@ -21,6 +21,7 @@ type MemorySearchManagerParams = {
 type MemorySearchManagerResult = {
   manager: MemorySearchManager | null;
   error?: string;
+  code?: string;
   debug?: {
     backend: "builtin";
     purpose: MemorySearchManagerPurpose;
@@ -50,7 +51,8 @@ async function getBuiltinMemorySearchManager(
     const { MemoryIndexManager } = await loadManagerRuntime();
     return { manager: await MemoryIndexManager.get(params) };
   } catch (err) {
-    return { manager: null, error: formatErrorMessage(err) };
+    const code = extractErrorCode(err);
+    return { manager: null, error: formatErrorMessage(err), ...(code ? { code } : {}) };
   }
 }
 

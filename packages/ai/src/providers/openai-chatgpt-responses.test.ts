@@ -456,6 +456,40 @@ describe("streamOpenAICodexResponses transport", () => {
     expect(result.errorMessage).toContain("Request timed out after 5ms");
   });
 
+  it("sends the canonical Codex Responses endpoint with the final stateless payload", async () => {
+    let requestUrl = "";
+    let requestPayload: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input, init) => {
+        requestUrl = String(input);
+        const encoding = new Headers(init?.headers).get("content-encoding");
+        const body =
+          encoding === "zstd"
+            ? Buffer.from(zstdDecompressSync(init?.body as Uint8Array)).toString("utf8")
+            : String(init?.body);
+        requestPayload = JSON.parse(body) as Record<string, unknown>;
+        return completedSseResponse();
+      }),
+    );
+
+    const result = await streamOpenAICodexResponses(
+      { ...model, baseUrl: "https://chatgpt.com/backend-api/codex/responses" },
+      context,
+      {
+        apiKey: createJwt({
+          "https://api.openai.com/auth": { chatgpt_account_id: "acct-canonical" },
+        }),
+        transport: "sse",
+      },
+    ).result();
+
+    expect(result.stopReason).toBe("stop");
+    expect(new URL(requestUrl).pathname).toBe("/backend-api/codex/responses");
+    expect(requestPayload).toMatchObject({ store: false, stream: true });
+    expect(requestPayload).not.toHaveProperty("metadata");
+  });
+
   it("does not replay Responses item ids for store-disabled ChatGPT requests", async () => {
     let capturedPayload:
       | {

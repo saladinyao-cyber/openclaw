@@ -173,6 +173,7 @@ export abstract class MemoryManagerSyncBase extends MemoryManagerDatabaseContext
   protected abstract pruneEmbeddingCacheIfNeeded(): void;
   protected abstract resetProviderInitializationForRetry(): void;
   protected abstract assertRequiredProviderAvailable(operation: "search" | "sync"): void;
+  protected assertSearchGenerationCurrent(): void {}
   protected abstract indexFile(
     entry: MemoryIndexEntry,
     options: { source: MemorySource; content?: string },

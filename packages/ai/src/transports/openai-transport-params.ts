@@ -349,6 +349,7 @@ function isNativeOpenAICodexResponsesBaseUrl(baseUrl?: string): boolean {
       "/backend-api/v1",
       "/backend-api/codex",
       "/backend-api/codex/v1",
+      "/backend-api/codex/responses",
     ].includes(pathname);
   } catch {
     return false;

@@ -37,11 +37,12 @@ export async function getMemoryManagerContextWithPurpose(params: {
     }
   | {
       error: string | undefined;
+      code?: string;
     }
 > {
   const { getMemorySearchManager } = await loadMemoryToolRuntime();
   const startedAt = Date.now();
-  const { manager, debug, error } = await getMemorySearchManager({
+  const { manager, debug, error, code } = await getMemorySearchManager({
     cfg: params.cfg,
     agentId: params.agentId,
     purpose: params.purpose,
@@ -56,7 +57,7 @@ export async function getMemoryManagerContextWithPurpose(params: {
           managerMs: debug?.managerMs ?? Math.max(0, Date.now() - startedAt),
         },
       }
-    : { error };
+    : { error, ...(code ? { code } : {}) };
 }
 
 export function createMemoryTool(params: {
@@ -108,6 +109,7 @@ export function buildMemorySearchUnavailableResult(
   // Provenance from the deadline owner, never the message text: a provider
   // error can read exactly like this tool's timeout.
   const isSearchDeadline = overrides?.deadline === true;
+  const isIndexNotReady = overrides?.code === "MEMORY_INDEX_NOT_READY";
   const deadlineAction = overrides?.agentId
     ? `Retry memory_search after a short wait: a memory-corpus timeout pauses retries for up to a minute. If memory-corpus timeouts persist, run: openclaw memory status --deep --agent ${overrides.agentId}, and rebuild with openclaw memory index --force --agent ${overrides.agentId} only if it reports the index dirty or incomplete`
     : "Retry memory_search after a short wait. If memory-corpus timeouts persist, inspect this agent's memory index before rebuilding it.";
@@ -115,24 +117,28 @@ export function buildMemorySearchUnavailableResult(
     overrides?.warning ??
     (overrides?.code === SESSION_CANONICAL_KEY_MIGRATION_REQUIRED
       ? SESSION_CANONICAL_KEY_MIGRATION_WARNING
-      : isQuotaError
-        ? "Memory search is unavailable because the embedding provider quota is exhausted."
-        : isMissingNodeSqlite
-          ? "Memory search is unavailable because this OpenClaw Node runtime does not provide SQLite support."
-          : isSearchDeadline
-            ? "Memory search did not finish within its time limit."
-            : "Memory search is unavailable due to an embedding/provider error.");
+      : isIndexNotReady
+        ? "Memory search is unavailable because the persisted index is not ready for this configuration or generation."
+        : isQuotaError
+          ? "Memory search is unavailable because the embedding provider quota is exhausted."
+          : isMissingNodeSqlite
+            ? "Memory search is unavailable because this OpenClaw Node runtime does not provide SQLite support."
+            : isSearchDeadline
+              ? "Memory search did not finish within its time limit."
+              : "Memory search is unavailable due to an embedding/provider error.");
   const action =
     overrides?.action ??
     (overrides?.code === SESSION_CANONICAL_KEY_MIGRATION_REQUIRED
       ? SESSION_CANONICAL_KEY_MIGRATION_ACTION
-      : isQuotaError
-        ? "Top up or switch embedding provider, then retry memory_search."
-        : isMissingNodeSqlite
-          ? "Run OpenClaw with a Node runtime that includes node:sqlite, then retry memory_search."
-          : isSearchDeadline
-            ? deadlineAction
-            : "Check embedding provider configuration and retry memory_search.");
+      : isIndexNotReady
+        ? "Retry memory_search once. If the index remains unavailable, run openclaw memory status --deep for this agent and rebuild only when it reports the index dirty or incomplete."
+        : isQuotaError
+          ? "Top up or switch embedding provider, then retry memory_search."
+          : isMissingNodeSqlite
+            ? "Run OpenClaw with a Node runtime that includes node:sqlite, then retry memory_search."
+            : isSearchDeadline
+              ? deadlineAction
+              : "Check embedding provider configuration and retry memory_search.");
   return {
     results: [],
     disabled: true,

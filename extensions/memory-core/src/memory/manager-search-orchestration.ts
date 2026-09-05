@@ -81,6 +81,15 @@ export abstract class MemorySearchOrchestration extends MemoryKeywordRetrieval {
     let releaseGeneration: (() => void) | undefined;
     return await this.withManagerOperation(async () => {
       opts?.onDebug?.({ backend: "builtin" });
+      if (
+        this.purpose === "search" &&
+        this.sources.has("sessions") &&
+        (!opts?.sources || opts.sources.includes("sessions"))
+      ) {
+        // Read-only search managers do not run sync maintenance, but session-backed
+        // queries must still surface catalog migration requirements before index gating.
+        await this.listSessionCorpusEntries();
+      }
       if (this.providerRequirement.mode === "required") {
         await this.ensureProviderInitialized();
         this.assertRequiredProviderAvailable("search");
@@ -230,6 +239,7 @@ export abstract class MemorySearchOrchestration extends MemoryKeywordRetrieval {
           this.settings.store.databasePath,
           opts?.signal,
         );
+        this.assertSearchGenerationCurrent();
         if (embeddingBootstrapKeywordOnly) {
           break;
         }

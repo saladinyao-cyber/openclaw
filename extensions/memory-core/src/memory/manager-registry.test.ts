@@ -1,4 +1,5 @@
 // Memory Core tests cover manager registry behavior.
+import fs from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
@@ -49,6 +50,35 @@ describe("memory index", () => {
     expect(replacement === first).toBe(false);
   });
 
+  it("invalidates a cached read-only manager when the persisted generation advances", async () => {
+    const cfg = createCfg({ provider: "none", vectorEnabled: false });
+    const writer = requireManager(await getMemorySearchManager({ cfg, agentId: "main" }));
+    trackManager(writer);
+    await writer.sync({ force: true, reason: "test-search-generation-initial" });
+    const first = requireManager(
+      await getMemorySearchManager({ cfg, agentId: "main", purpose: "search" }),
+    );
+    trackManager(first);
+
+    await fs.writeFile(
+      path.join(fixture.paths.memory, "2026-01-12.md"),
+      "# Log\nA newly published giraffe memory.",
+    );
+    await writer.sync({ force: true, reason: "test-search-generation-next" });
+
+    await expect(first.search("giraffe", { maxResults: 5, minScore: 0 })).rejects.toMatchObject({
+      code: "MEMORY_INDEX_NOT_READY",
+    });
+    const replacement = requireManager(
+      await getMemorySearchManager({ cfg, agentId: "main", purpose: "search" }),
+    );
+    trackManager(replacement);
+    expect(replacement).not.toBe(first);
+    await expect(
+      replacement.search("giraffe", { maxResults: 5, minScore: 0 }),
+    ).resolves.not.toEqual([]);
+  });
+
   it("fails closed when persisted memory index identity does not match", async () => {
     const cfg = createCfg({ provider: "none", vectorEnabled: false });
     const writer = requireManager(await getMemorySearchManager({ cfg, agentId: "main" }));
@@ -66,9 +96,11 @@ describe("memory index", () => {
     );
     db.close();
 
-    const rejected = await getMemorySearchManager({ cfg, agentId: "main", purpose: "search" });
-    expect(rejected.manager).toBeNull();
-    expect(rejected.error).toMatch(/identity is mismatched|index scope changed/iu);
+    const acquired = await getMemorySearchManager({ cfg, agentId: "main", purpose: "search" });
+    const search = requireManager(acquired);
+    trackManager(search);
+    await expect(search.search("alpha", { maxResults: 5, minScore: 0 })).resolves.toEqual([]);
+    expect(search.status().dirty).toBe(true);
   });
 
   it("fails closed when the persisted vector clean marker requires a rebuild", async () => {

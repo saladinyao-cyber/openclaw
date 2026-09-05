@@ -44,6 +44,11 @@ import {
   resetMemoryBatchFailureState,
 } from "./manager-batch-state.js";
 import {
+  assertMemoryIndexIncrementalCommitCurrent,
+  MemoryIndexIncrementalConflictError,
+  readMemoryDatabaseRevision,
+} from "./manager-db.js";
+import {
   collectMemoryCachedEmbeddings,
   loadMemoryEmbeddingCache,
   upsertMemoryEmbeddingCache,
@@ -114,6 +119,8 @@ type IndexedMemoryChunk = MemoryChunk & {
 type PreparedMemoryIndexEntry = {
   entry: MemoryIndexEntry;
   source: MemorySource;
+  revisionAtPrepare: number;
+  sourceHashAtPrepare: string | null;
   chunks: IndexedMemoryChunk[];
   structuredInputBytes?: number;
 };
@@ -392,7 +399,13 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
           providerKey,
           identities,
         }
-      : { kind: "fts-only", database: this.db, provider: null, providerKey, identities };
+      : {
+          kind: "fts-only",
+          database: this.db,
+          provider: null,
+          providerKey,
+          identities,
+        };
     this.syncProviderGenerationRelease = provider ? this.acquireProviderUse(provider) : null;
     this.syncProviderGenerationOwners = 1;
   }
@@ -918,6 +931,26 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       .run(pathname, source);
   }
 
+  private assertIncrementalCommitCurrent(
+    prepared: PreparedMemoryIndexEntry,
+    generation: MemorySyncProviderGeneration | null,
+  ): void {
+    if (generation && generation.database === this.db) {
+      if (this.syncProviderGeneration !== generation) {
+        throw new MemoryIndexIncrementalConflictError(
+          `Memory index provider generation changed while indexing ${prepared.entry.path}; retry the incremental sync.`,
+        );
+      }
+    }
+    assertMemoryIndexIncrementalCommitCurrent({
+      db: this.db,
+      path: prepared.entry.path,
+      source: prepared.source,
+      revisionAtPrepare: prepared.revisionAtPrepare,
+      sourceHashAtPrepare: prepared.sourceHashAtPrepare,
+    });
+  }
+
   private assertMemoryFileSnapshot(entry: MemoryIndexEntry, currentHash: string | undefined): void {
     if (currentHash === entry.hash) {
       return;
@@ -927,7 +960,7 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
   }
 
   private async writeChunks(
-    { entry, source, chunks }: PreparedMemoryIndexEntry,
+    { entry, source, revisionAtPrepare, sourceHashAtPrepare, chunks }: PreparedMemoryIndexEntry,
     generation: MemorySyncProviderGeneration | null,
     embeddings: number[][],
     vectorReady: boolean,
@@ -948,6 +981,10 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       const needsVectorRebuild =
         !vectorReady && embeddings.some((embedding) => embedding.length > 0);
       runSqliteImmediateTransactionSync(this.db, () => {
+        this.assertIncrementalCommitCurrent(
+          { entry, source, chunks, revisionAtPrepare, sourceHashAtPrepare },
+          generation,
+        );
         if (source === "sessions") {
           const sessionId = expectDefined(entry.sessionId, "memory index session identity");
           // Embedding and vector setup may await while a purge completes. Read the
@@ -1073,6 +1110,12 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
     generation: MemorySyncProviderGeneration | null,
   ): Promise<PreparedMemoryIndexEntry | null> {
     return await withMemoryWorkspaceLock(this.workspaceDir, async () => {
+      const revisionAtPrepare = readMemoryDatabaseRevision(this.db);
+      const sourceRow = this.db
+        .prepare("SELECT hash FROM memory_index_sources WHERE path = ? AND source = ?")
+        // SAFETY: SQLite rows are untyped; the source hash is validated below.
+        .get(entry.path, options.source) as { hash?: unknown } | undefined;
+      const sourceHashAtPrepare = typeof sourceRow?.hash === "string" ? sourceRow.hash : null;
       const pathClassification = await resolveMemoryPathClassification({
         absolutePath: entry.absPath,
         source: options.source,
@@ -1100,6 +1143,8 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
         return {
           entry,
           source: options.source,
+          revisionAtPrepare,
+          sourceHashAtPrepare,
           chunks: [chunk],
           structuredInputBytes: multimodalChunk.structuredInputBytes,
         };
@@ -1167,7 +1212,7 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       if (options.source === "sessions" && "lineMap" in entry) {
         remapChunkLines(chunks, entry.lineMap);
       }
-      return { entry, source: options.source, chunks };
+      return { entry, source: options.source, revisionAtPrepare, sourceHashAtPrepare, chunks };
     });
   }
 

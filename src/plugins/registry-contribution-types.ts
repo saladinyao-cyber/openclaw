@@ -235,6 +235,7 @@ export type MemoryPluginRuntime = {
       managerMs?: number;
     };
     error?: string;
+    code?: string;
   }>;
   resolveMemoryBackendConfig(params: {
     cfg: OpenClawConfig;

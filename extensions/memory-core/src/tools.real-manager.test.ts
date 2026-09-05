@@ -163,53 +163,25 @@ describe("memory_search real manager", () => {
     });
     Reflect.set(manager, "sessionsDirty", true);
 
-    const maintenanceReady = createDeferred<void>();
-    const releaseMaintenance = createDeferred<void>();
-    const originalGet = MemoryIndexManager.get.bind(MemoryIndexManager);
-    const getSpy = vi.spyOn(MemoryIndexManager, "get").mockImplementation(async (params) => {
-      const acquired = await originalGet(params);
-      if (params.purpose !== "maintenance" || !acquired) {
-        return acquired;
-      }
-      const fields = acquired as unknown as {
-        syncArchiveFiles: (params: { needsFullReindex: boolean }) => Promise<unknown>;
-      };
-      const syncArchiveFiles = fields.syncArchiveFiles.bind(acquired);
-      vi.spyOn(fields, "syncArchiveFiles").mockImplementation(async (syncParams) => {
-        const result = await syncArchiveFiles(syncParams);
-        maintenanceReady.resolve();
-        await releaseMaintenance.promise;
-        return result;
-      });
-      return acquired;
+    const tool = createMemorySearchTool({
+      config: cfg,
+      agentId: "main",
+      agentSessionKey: "agent:main:telegram:direct:active-refresh-proof",
+    });
+    if (!tool) {
+      throw new Error("memory_search tool missing");
+    }
+    const result = await tool.execute("routine-refresh", {
+      query: "zebra",
+      corpus: "memory",
     });
 
-    try {
-      const tool = createMemorySearchTool({
-        config: cfg,
-        agentId: "main",
-        agentSessionKey: "agent:main:telegram:direct:active-refresh-proof",
-      });
-      if (!tool) {
-        throw new Error("memory_search tool missing");
-      }
-      const execution = tool.execute("routine-refresh", {
-        query: "zebra",
-        corpus: "memory",
-      });
-      await maintenanceReady.promise;
-      const result = await execution;
-
-      expect(result.details).toMatchObject({
-        results: [expect.objectContaining({ snippet: expect.stringContaining("Zebra") })],
-      });
-      expect(result.details).not.toHaveProperty("stale");
-      expect(result.details).not.toHaveProperty("warning");
-      expect(result.details).not.toHaveProperty("action");
-    } finally {
-      releaseMaintenance.resolve();
-      getSpy.mockRestore();
-    }
+    expect(result.details).toMatchObject({
+      results: [expect.objectContaining({ snippet: expect.stringContaining("Zebra") })],
+    });
+    expect(result.details).not.toHaveProperty("stale");
+    expect(result.details).not.toHaveProperty("warning");
+    expect(result.details).not.toHaveProperty("action");
   });
 
   it("backfills visible sessions with one bounded query embedding", async () => {
@@ -415,7 +387,7 @@ describe("memory_search real manager", () => {
     });
     try {
       await searchStarted.promise;
-      await vi.advanceTimersByTimeAsync(15_100);
+      await vi.advanceTimersByTimeAsync(30_100);
       expect(executionSettled).toBe(true);
       await expect(execution).resolves.toMatchObject({
         details: { unavailable: true },

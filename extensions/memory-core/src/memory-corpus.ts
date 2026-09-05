@@ -12,6 +12,7 @@ import {
 } from "./memory/search-deadline.js";
 
 type MemoryCorpus = "memory" | "wiki";
+const DEFAULT_MEMORY_READ_TIMEOUT_MS = 15_000;
 type MemorySupplement = ReturnType<typeof listMemoryCorpusSupplements>[number];
 type MemorySupplementGetResult = NonNullable<
   Awaited<ReturnType<MemorySupplement["supplement"]["get"]>>
@@ -100,13 +101,15 @@ export async function runMemoryCorpusDeadline<T>(params: {
     throw resolveMemorySearchAbortError(params.parentSignal);
   }
   const controller = new AbortController();
+  const timeoutMs =
+    params.operation === "memory_search"
+      ? DEFAULT_MEMORY_SEARCH_TIMEOUT_MS
+      : DEFAULT_MEMORY_READ_TIMEOUT_MS;
   const timer = setTimeout(() => {
     controller.abort(
-      createMemorySearchDeadlineError(
-        `${params.operation} timed out after ${DEFAULT_MEMORY_SEARCH_TIMEOUT_MS / 1000}s`,
-      ),
+      createMemorySearchDeadlineError(`${params.operation} timed out after ${timeoutMs / 1000}s`),
     );
-  }, DEFAULT_MEMORY_SEARCH_TIMEOUT_MS);
+  }, timeoutMs);
   timer.unref?.();
   const onParentAbort = () => controller.abort(resolveMemorySearchAbortError(params.parentSignal!));
   params.parentSignal?.addEventListener("abort", onParentAbort, { once: true });

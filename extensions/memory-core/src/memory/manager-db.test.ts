@@ -1,4 +1,5 @@
 // Memory Core tests cover shared agent database publication and shadow cleanup.
+import { fork, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,7 @@ import {
   resetMemoryCoreDreamingStateForTests,
 } from "../test-helpers.js";
 import {
+  assertMemoryIndexIncrementalCommitCurrent,
   cleanupAgedMemoryReindexTempFiles,
   closeMemoryDatabase,
   openMemoryDatabaseAtPath,
@@ -35,6 +37,43 @@ async function expectPathMissing(targetPath: string): Promise<void> {
   await expect(fs.access(targetPath)).rejects.toThrow("ENOENT");
 }
 
+type IncrementalCasChildMessage = {
+  type: "ready" | "done";
+  outcome?: "committed" | "conflict";
+  code?: string;
+};
+
+function waitForChildMessage(
+  child: ChildProcess,
+  predicate: (message: IncrementalCasChildMessage) => boolean,
+): Promise<IncrementalCasChildMessage> {
+  return new Promise((resolve, reject) => {
+    const onMessage = (message: IncrementalCasChildMessage) => {
+      if (!predicate(message)) {
+        return;
+      }
+      cleanup();
+      resolve(message);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code: number | null) => {
+      cleanup();
+      reject(new Error(`incremental CAS child exited before reporting (code ${code})`));
+    };
+    const cleanup = () => {
+      child.off("message", onMessage);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+    child.on("message", onMessage);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+
 describe("memory manager database publication", () => {
   let fixtureRoot = "";
 
@@ -49,6 +88,72 @@ describe("memory manager database publication", () => {
 
   afterEach(async () => {
     await fs.rm(fixtureRoot, { recursive: true, force: true });
+  });
+
+  it("lets only one of two processes commit a stale shared incremental source plan", async () => {
+    const dbPath = path.join(fixtureRoot, "incremental-race.sqlite");
+    const db = new DatabaseSync(dbPath);
+    ensureTestMemorySchema(db);
+    db.prepare(
+      "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
+    ).run("MEMORY.md", "memory", "initial", 1, 1);
+    db.close();
+
+    const childUrl = new URL("./manager-incremental-cas.child.ts", import.meta.url);
+    const children = ["from-a", "from-b"].map((hash) =>
+      fork(childUrl, [dbPath, hash], {
+        execArgv: ["--import", "tsx"],
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      }),
+    );
+    try {
+      await Promise.all(
+        children.map((child) => waitForChildMessage(child, (message) => message.type === "ready")),
+      );
+      const outcomes = children.map((child) =>
+        waitForChildMessage(child, (message) => message.type === "done"),
+      );
+      for (const child of children) {
+        child.send("commit");
+      }
+      const settled = await Promise.all(outcomes);
+      expect(settled.map((message) => message.outcome).toSorted()).toEqual([
+        "committed",
+        "conflict",
+      ]);
+      expect(settled.find((message) => message.outcome === "conflict")?.code).toBe(
+        "MEMORY_INDEX_INCREMENTAL_CONFLICT",
+      );
+    } finally {
+      for (const child of children) {
+        child.kill();
+      }
+    }
+  });
+
+  it("accepts an unrelated revision advance when the planned source hash is unchanged", () => {
+    const db = new DatabaseSync(path.join(fixtureRoot, "incremental-unrelated.sqlite"));
+    try {
+      ensureTestMemorySchema(db);
+      db.prepare(
+        "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
+      ).run("MEMORY.md", "memory", "initial", 1, 1);
+      const revisionAtPrepare = readMemoryDatabaseRevision(db);
+      db.prepare(
+        "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
+      ).run("memory/other.md", "memory", "other", 1, 1);
+      expect(() =>
+        assertMemoryIndexIncrementalCommitCurrent({
+          db,
+          path: "MEMORY.md",
+          source: "memory",
+          revisionAtPrepare,
+          sourceHashAtPrepare: "initial",
+        }),
+      ).not.toThrow();
+    } finally {
+      db.close();
+    }
   });
 
   it("sets busy_timeout on memory sqlite connections", () => {

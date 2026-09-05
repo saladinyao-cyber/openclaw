@@ -119,6 +119,45 @@ export function readMemoryDatabaseRevision(db: DatabaseSync): number {
 
 export class MemoryIndexRevisionConflictError extends Error {}
 
+export class MemoryIndexIncrementalConflictError extends Error {
+  readonly code = "MEMORY_INDEX_INCREMENTAL_CONFLICT";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "MemoryIndexIncrementalConflictError";
+  }
+}
+
+export class MemorySearchIndexNotReadyError extends Error {
+  readonly code = "MEMORY_INDEX_NOT_READY";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "MemorySearchIndexNotReadyError";
+  }
+}
+
+export function assertMemoryIndexIncrementalCommitCurrent(params: {
+  db: DatabaseSync;
+  path: string;
+  source: "memory" | "sessions";
+  revisionAtPrepare: number;
+  sourceHashAtPrepare: string | null;
+}): void {
+  const liveRevision = readMemoryDatabaseRevision(params.db);
+  const row = params.db
+    .prepare("SELECT hash FROM memory_index_sources WHERE path = ? AND source = ?")
+    // SAFETY: SQLite rows are untyped; the hash is validated below.
+    .get(params.path, params.source) as { hash?: unknown } | undefined;
+  const liveSourceHash = typeof row?.hash === "string" ? row.hash : null;
+  if (liveSourceHash !== params.sourceHashAtPrepare) {
+    throw new MemoryIndexIncrementalConflictError(
+      `Memory index source ${params.path} changed before commit ` +
+        `(planned at revision ${params.revisionAtPrepare}, found ${liveRevision}); retry the incremental sync.`,
+    );
+  }
+}
+
 /** Reset derived content without replacing the shared agent database or its schema. */
 export async function resetMemoryDatabase(params: {
   targetDb: DatabaseSync;
@@ -508,18 +547,22 @@ export function assertMemorySearchDatabaseSchema(
   for (const entry of required) {
     const row = db
       .prepare("SELECT type FROM sqlite_schema WHERE name = ? COLLATE NOCASE")
+      // SAFETY: SQLite catalog rows are untyped; the type is compared to a closed expected value.
       .get(entry.name) as { type?: unknown } | undefined;
     if (row?.type !== entry.type) {
-      throw new Error(
+      throw new MemorySearchIndexNotReadyError(
         `Memory search database schema is incomplete: missing ${entry.type} ${entry.name}; run openclaw doctor --fix and rebuild the memory index.`,
       );
     }
   }
   const revision = db
     .prepare("SELECT revision FROM memory_index_state WHERE id = ?")
+    // SAFETY: SQLite rows are untyped; the revision is validated as a safe integer below.
     .get(MEMORY_INDEX_STATE_ID) as { revision?: unknown } | undefined;
   if (typeof revision?.revision !== "number" || !Number.isSafeInteger(revision.revision)) {
-    throw new Error("Memory search database revision marker is missing or invalid");
+    throw new MemorySearchIndexNotReadyError(
+      "Memory search database revision marker is missing or invalid",
+    );
   }
   if (!params.ftsEnabled) {
     return;
@@ -528,6 +571,7 @@ export function assertMemorySearchDatabaseSchema(
   for (const tableName of ["memory_index_chunks_fts", "memory_index_paths_fts"]) {
     const row = db
       .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ? COLLATE NOCASE")
+      // SAFETY: SQLite catalog rows are untyped; only a guarded string is inspected below.
       .get(tableName) as { sql?: unknown } | undefined;
     const sql = typeof row?.sql === "string" ? row.sql.toLowerCase() : "";
     const isFts5 = /\busing\s+fts5\s*\(/u.test(sql);
@@ -536,7 +580,7 @@ export function assertMemorySearchDatabaseSchema(
         ? /tokenize\s*=\s*['"]trigram case_sensitive 0['"]/u.test(sql)
         : !/tokenize\s*=\s*['"]trigram/u.test(sql);
     if (!isFts5 || !tokenizerMatches) {
-      throw new Error(
+      throw new MemorySearchIndexNotReadyError(
         `Memory search database FTS schema is incompatible for ${tableName}; rebuild the memory index.`,
       );
     }
@@ -550,12 +594,9 @@ export function assertMemorySearchIndexReady(params: {
   metaVectorDims?: number;
   hasSemanticChunks: boolean;
 }): void {
-  if (params.identity.status !== "valid") {
-    throw new Error(
-      `Memory search index identity is ${params.identity.status}: ${params.identity.reason}`,
-    );
-  }
-  if (!params.vectorEnabled) {
+  // Identity mismatches remain readable for status diagnostics and precise rebuild guidance.
+  // Search orchestration refuses results until the identity becomes valid.
+  if (params.identity.status !== "valid" || !params.vectorEnabled) {
     return;
   }
   const vectorState = resolvePersistedMemoryVectorIndexState({
@@ -565,7 +606,7 @@ export function assertMemorySearchIndexReady(params: {
     hasSemanticChunks: params.hasSemanticChunks,
   }).state;
   if (vectorState !== "complete" && vectorState !== "empty") {
-    throw new Error(
+    throw new MemorySearchIndexNotReadyError(
       `Memory search vector index is ${vectorState}; run a writable memory index rebuild before searching.`,
     );
   }

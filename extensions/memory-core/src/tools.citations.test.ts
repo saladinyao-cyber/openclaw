@@ -154,7 +154,7 @@ describe("memory tools", () => {
     });
   });
 
-  it("uses default memory manager mode for shared memory_search", async () => {
+  it("uses cached read-only manager mode for shared memory_search", async () => {
     const tool = createMemorySearchToolOrThrow({
       config: asOpenClawConfig({
         agents: { list: [{ id: "main", default: true }] },
@@ -166,7 +166,7 @@ describe("memory tools", () => {
     expect(getMemorySearchManagerMockParams()).toEqual([
       expect.objectContaining({
         agentId: "main",
-        purpose: undefined,
+        purpose: "search",
       }),
     ]);
     expect(getMemoryCloseMockCalls()).toBe(0);
@@ -637,7 +637,7 @@ describe("memory tools", () => {
         query: "alpha",
         corpus: "all",
       });
-      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(30_000);
       const stalledAllResult = await stalledAllResultPromise;
       expect(stalledAllResult.details).toMatchObject({
         results: [{ corpus: "memory", path: "MEMORY.md" }],
@@ -646,7 +646,7 @@ describe("memory tools", () => {
           {
             corpus: "wiki",
             outcome: "unavailable",
-            error: "memory_search timed out after 15s",
+            error: "memory_search timed out after 30s",
           },
         ],
         warning: expect.stringContaining("Wiki corpus unavailable"),
@@ -738,7 +738,7 @@ describe("memory tools", () => {
         query: "alpha",
         corpus: "all",
       });
-      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(30_000);
       const stalledAllResult = await stalledAllResultPromise;
       expect(stalledAllResult.details).toMatchObject({
         results: [{ corpus: "wiki", path: "entities/alpha.md" }],
@@ -746,7 +746,7 @@ describe("memory tools", () => {
           {
             corpus: "memory",
             outcome: "unavailable",
-            error: "memory_search timed out after 15s",
+            error: "memory_search timed out after 30s",
           },
           { corpus: "wiki", outcome: "ok" },
         ],
@@ -769,12 +769,12 @@ describe("memory tools", () => {
         {
           corpus: "memory",
           outcome: "unavailable",
-          error: "memory_search timed out after 15s",
+          error: "memory_search timed out after 30s",
         },
         { corpus: "wiki", outcome: "ok" },
       ]);
       expect(details.warning).toContain("Memory corpus unavailable");
-      expect(details.warning).toContain("memory_search timed out after 15s");
+      expect(details.warning).toContain("memory_search timed out after 30s");
       expect(searchCalls).toBe(1);
     } finally {
       vi.useRealTimers();

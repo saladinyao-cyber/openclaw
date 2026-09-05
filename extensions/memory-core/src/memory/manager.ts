@@ -31,6 +31,8 @@ import {
   assertMemorySearchIndexReady,
   closeMemoryDatabase,
   memoryDatabaseTableExists,
+  MemorySearchIndexNotReadyError,
+  readMemoryDatabaseRevision,
 } from "./manager-db.js";
 import {
   clearMemoryEmbeddingProbeCache,
@@ -131,6 +133,8 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
   private queuedProgressCallbacks = new Set<NonNullable<MemorySyncParams["progress"]>>();
   private queuedSessionSync: Promise<void> | null = null;
   protected indexIdentityState: MemoryIndexIdentityState;
+  private publishedRevision = 0;
+  private searchGenerationInvalid = false;
 
   static async get(params: {
     cfg: OpenClawConfig;
@@ -181,7 +185,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
               }
               return manager;
             },
-            reuse: (manager) => !manager.closing && !manager.closed,
+            reuse: (manager) => manager.isReusable(),
           };
         },
         close: async (manager) => await manager.close(),
@@ -256,6 +260,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
           hasSemanticChunks: this.hasSemanticChunks(),
         });
       }
+      this.publishedRevision = readMemoryDatabaseRevision(this.db);
       this.indexIdentityDirty =
         initialIndexIdentity.status === "mismatched" ||
         (initialIndexIdentity.status === "missing" && this.sources.has("memory"));
@@ -295,6 +300,34 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
       closeMemoryDatabase(this.db);
       throw err;
     }
+  }
+
+  private isReusable(): boolean {
+    if (this.closing || this.closed || this.searchGenerationInvalid) {
+      return false;
+    }
+    return (
+      this.purpose !== "search" || readMemoryDatabaseRevision(this.db) === this.publishedRevision
+    );
+  }
+
+  protected override assertSearchGenerationCurrent(): void {
+    if (this.purpose !== "search") {
+      return;
+    }
+    if (this.searchGenerationInvalid) {
+      throw new MemorySearchIndexNotReadyError(
+        "Memory search index generation changed; reacquire the search manager and retry.",
+      );
+    }
+    const revision = readMemoryDatabaseRevision(this.db);
+    if (revision === this.publishedRevision) {
+      return;
+    }
+    this.searchGenerationInvalid = true;
+    throw new MemorySearchIndexNotReadyError(
+      `Memory search index generation changed from revision ${this.publishedRevision} to ${revision}; reacquire the search manager and retry.`,
+    );
   }
 
   async sync(params?: MemorySyncParams): Promise<void> {

@@ -351,7 +351,9 @@ export function createMemorySearchTool(options: MemoryToolOptions) {
                 }),
               );
               if ("error" in memory) {
-                throw new Error(memory.error ?? "memory search unavailable");
+                throw Object.assign(new Error(memory.error ?? "memory search unavailable"), {
+                  code: memory.code,
+                });
               }
               const explicitSources: MemorySource[] | undefined =
                 requestedCorpus === "sessions" &&
