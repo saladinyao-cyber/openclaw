@@ -511,8 +511,8 @@ describe("memory_search unavailable payloads", () => {
     expect(searchCalls).toBe(2);
     expect(getMemorySearchManagerMockCalls()).toBe(2);
     expect(getMemorySearchManagerMockParams()).toEqual([
-      expect.objectContaining({ purpose: undefined }),
-      expect.objectContaining({ purpose: undefined }),
+      expect.objectContaining({ purpose: "search" }),
+      expect.objectContaining({ purpose: "search" }),
     ]);
     expect(getMemoryCloseMockCalls()).toBe(0);
   });
@@ -582,6 +582,9 @@ describe("memory_search unavailable payloads", () => {
 
     expect((result.details as { results?: unknown[] }).results).toEqual([]);
     expect(searchCalls).toBe(1);
+    expect(getMemorySearchManagerMockParams()).toEqual([
+      expect.objectContaining({ purpose: "search" }),
+    ]);
     expect(getMemorySyncMockCalls()).toBe(0);
   });
 

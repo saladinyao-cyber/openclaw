@@ -315,7 +315,8 @@ export function createMemorySearchTool(options: MemoryToolOptions) {
         const toolStartedAt = Date.now();
         const searchesMemory = requestedCorpus !== "wiki";
         const searchesWiki = requestedCorpus === "wiki" || requestedCorpus === "all";
-        const memoryManagerPurpose = options.oneShotCliRun ? "cli" : undefined;
+        // Tool searches must never inherit the default manager's write lifecycle.
+        const memoryManagerPurpose = options.oneShotCliRun ? "cli" : "search";
         const memoryManagersToClose = new Set<ActiveMemoryManagerContext["manager"]>();
         let cleanupStarted = false;
         const trackMemoryManager = (context: MemoryManagerContext): MemoryManagerContext => {
