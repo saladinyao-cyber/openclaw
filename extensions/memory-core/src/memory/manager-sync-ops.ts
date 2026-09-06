@@ -41,7 +41,6 @@ import {
   MEMORY_INDEX_PROVENANCE_VERSION,
   resolveConfiguredScopeHash,
   resolveConfiguredSourcesForMeta,
-  resolveMemoryIndexIdentityState,
   type MemoryIndexMeta,
   type MemoryIndexProviderIdentity,
 } from "./manager-reindex-state.js";
@@ -202,27 +201,15 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
       const syncProviderIdentities =
         this.syncProviderGeneration?.identities ?? this.resolveProviderIndexIdentities();
       const resolveCurrentSyncIndexIdentity = () =>
-        resolveMemoryIndexIdentityState({
+        this.resolveCurrentIndexIdentityState({
           meta: this.readMeta(),
           // Also detects provider→FTS-only transitions so orphaned old-model FTS rows are cleaned up.
           provider: syncProvider ? { id: syncProvider.id, model: syncProvider.model } : null,
           providerKey: syncProviderKey ?? undefined,
-          providerAliases: syncProviderIdentities.slice(1),
-          configuredSources: resolveConfiguredSourcesForMeta(this.sources),
-          configuredScopeHash: resolveConfiguredScopeHash({
-            workspaceDir: this.workspaceDir,
-            extraPaths: this.settings.extraPaths,
-            multimodal: {
-              enabled: this.settings.multimodal.enabled,
-              modalities: this.settings.multimodal.modalities,
-              maxFileBytes: this.settings.multimodal.maxFileBytes,
-            },
-          }),
-          chunkTokens: this.settings.chunking.tokens,
-          chunkOverlap: this.settings.chunking.overlap,
+          providerIdentities: syncProviderIdentities,
+          providerKeyKnown: true,
           vectorReady,
           hasIndexedChunks: this.hasIndexedChunks(),
-          ftsTokenizer: this.settings.store.fts.tokenizer,
         });
       const indexIdentity = resolveCurrentSyncIndexIdentity();
       const revisionAtIdentityPreflight = readMemoryDatabaseRevision(this.db);
