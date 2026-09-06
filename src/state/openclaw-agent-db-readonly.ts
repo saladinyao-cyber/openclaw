@@ -60,7 +60,16 @@ function findOpenAgentDatabase(
   }
 }
 
-/** Open one existing agent database without creating, registering, migrating, or adopting it. */
+/**
+ * Open one existing agent database without creating, registering, migrating, or
+ * adopting it.
+ *
+ * Read-only means query-only (no row data is mutated and `PRAGMA query_only` is
+ * enforced by callers that require it), not filesystem-pure: opening a WAL-mode
+ * database whose `-shm`/`-wal` sidecars are absent can still create them. Use an
+ * artifact-preserving snapshot when the directory must remain byte-for-byte
+ * untouched.
+ */
 export function openOpenClawAgentDatabaseReadOnly(
   options: OpenClawAgentDatabaseOptions,
   behavior: Pick<OpenClawAgentDatabaseReadOnlyBehavior, "allowExtension"> = {},
