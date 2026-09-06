@@ -165,6 +165,22 @@ describe("buildProviderToolCompatFamilyHooks", () => {
     expect(normalized[0]?.parameters).toEqual(strictObject());
   });
 
+  it.each([
+    "http://chatgpt.com/backend-api/codex",
+    "https://chatgpt.com.evil.example/backend-api/codex",
+    "https://chatgpt.com/backend-api/codex/v2",
+    "https://chatgpt.com/backend-api/codex?tenant=one",
+  ])("does not apply native OpenAI tool policy to endpoint lookalike %s", (baseUrl) => {
+    const tools = [tool({ type: "string" })];
+    const normalized = normalizeOpenAITools(tools, {
+      provider: "openai",
+      modelApi: "openai-chatgpt-responses",
+      baseUrl,
+    });
+
+    expect(normalized).toBe(tools);
+  });
+
   it("leaves non-openai providers untouched by OpenAI strict compat", () => {
     const tools = [tool({ type: "string" })];
     const normalized = normalizeOpenAITools(tools, {

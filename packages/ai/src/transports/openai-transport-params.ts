@@ -11,6 +11,7 @@ import {
 } from "../providers/openai-tool-schema.js";
 import { resolveModelRequestTimeoutMs, resolveProviderRequestPolicyConfig } from "./host-policy.js";
 import { resolveOpenAICompletionsCompat } from "./openai-completions-compat.js";
+import { classifyOpenAIBaseUrl } from "./openai-endpoint.js";
 import { resolveOpenAIReasoningEffortMap } from "./openai-reasoning-compat.js";
 import type { OpenAIModeModel } from "./openai-transport-shared.js";
 import { isCodeModeModelVisibleToolName, sha256Hex } from "./transport-utils.js";
@@ -330,34 +331,8 @@ export function isOpenAICodexResponsesModel(model: Model): boolean {
   );
 }
 
-function isNativeOpenAICodexResponsesBaseUrl(baseUrl?: string): boolean {
-  const trimmed = typeof baseUrl === "string" ? baseUrl.trim() : "";
-  if (!trimmed) {
-    return false;
-  }
-  try {
-    const url = new URL(trimmed);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return false;
-    }
-    if (url.hostname.toLowerCase() !== "chatgpt.com") {
-      return false;
-    }
-    const pathname = url.pathname.replace(/\/+$/u, "").toLowerCase();
-    return [
-      "/backend-api",
-      "/backend-api/v1",
-      "/backend-api/codex",
-      "/backend-api/codex/v1",
-      "/backend-api/codex/responses",
-    ].includes(pathname);
-  } catch {
-    return false;
-  }
-}
-
 export function usesNativeOpenAICodexResponsesBackend(model: Model): boolean {
-  return isOpenAICodexResponsesModel(model) && isNativeOpenAICodexResponsesBaseUrl(model.baseUrl);
+  return isOpenAICodexResponsesModel(model) && classifyOpenAIBaseUrl(model.baseUrl) === "chatgpt";
 }
 
 export function buildOpenAIClientHeaders(

@@ -490,6 +490,56 @@ describe("streamOpenAICodexResponses transport", () => {
     expect(requestPayload).not.toHaveProperty("metadata");
   });
 
+  it("uses the same canonical endpoint and stateless payload for WebSocket dispatch", async () => {
+    let requestUrl = "";
+    let requestPayload: Record<string, unknown> | undefined;
+    class CapturingWebSocket extends EventTarget {
+      constructor(url: string) {
+        super();
+        requestUrl = url;
+        queueMicrotask(() => this.dispatchEvent(new Event("open")));
+      }
+
+      send(payload: string): void {
+        requestPayload = JSON.parse(payload) as Record<string, unknown>;
+        queueMicrotask(() => {
+          this.dispatchEvent(
+            Object.assign(new Event("message"), {
+              data: JSON.stringify({
+                type: "response.completed",
+                response: {
+                  id: "resp_ws_canonical",
+                  status: "completed",
+                  output: [],
+                  usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+                },
+              }),
+            }),
+          );
+        });
+      }
+
+      close(): void {}
+    }
+    vi.stubGlobal("WebSocket", CapturingWebSocket);
+
+    const result = await streamOpenAICodexResponses(
+      { ...model, baseUrl: "https://chatgpt.com/backend-api/codex/responses" },
+      context,
+      {
+        apiKey: createJwt({
+          "https://api.openai.com/auth": { chatgpt_account_id: "acct-canonical-ws" },
+        }),
+        transport: "websocket",
+      },
+    ).result();
+
+    expect(result.stopReason).toBe("stop");
+    expect(new URL(requestUrl).pathname).toBe("/backend-api/codex/responses");
+    expect(requestPayload).toMatchObject({ store: false, stream: true });
+    expect(requestPayload).not.toHaveProperty("metadata");
+  });
+
   it("does not replay Responses item ids for store-disabled ChatGPT requests", async () => {
     let capturedPayload:
       | {

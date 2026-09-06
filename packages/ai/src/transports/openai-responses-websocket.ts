@@ -6,6 +6,7 @@ import type {
 import { ResponsesWS } from "openai/resources/responses/ws.js";
 import { getAiTransportHost, resolveAiTransportHeaderSentinels } from "../host.js";
 import { registerSessionResourceCleanup } from "../session-resources.js";
+import { isOpenAIPlatformResponsesBaseUrl } from "./openai-endpoint.js";
 import {
   resolveResponsesContinuationRequest,
   type ResponsesContinuationRequest,
@@ -53,24 +54,6 @@ type OpenAIResponsesWebSocketStream = {
 const websocketSessionCache = new Map<string, CachedWebSocketConnection>();
 const degradedWebSocketConnections = new Map<string, { sessionId?: string; retryAt: number }>();
 
-function isOfficialOpenAIResponsesBaseUrl(baseUrl: string | undefined): boolean {
-  if (!baseUrl) {
-    return false;
-  }
-  try {
-    const url = new URL(baseUrl);
-    return (
-      url.origin === "https://api.openai.com" &&
-      url.username === "" &&
-      url.password === "" &&
-      url.search === "" &&
-      url.hash === "" &&
-      url.pathname.replace(/\/+$/, "") === "/v1"
-    );
-  } catch {
-    return false;
-  }
-}
 export function supportsNativeOpenAIResponsesEndpoint(params: {
   provider: string;
   api: string;
@@ -79,7 +62,7 @@ export function supportsNativeOpenAIResponsesEndpoint(params: {
   return (
     params.provider.trim().toLowerCase() === "openai" &&
     params.api === "openai-responses" &&
-    isOfficialOpenAIResponsesBaseUrl(params.baseUrl)
+    isOpenAIPlatformResponsesBaseUrl(params.baseUrl)
   );
 }
 
@@ -127,7 +110,7 @@ function prepareWebSocketConnection(
   client: OpenAI,
   headers: Record<string, string> | undefined,
 ): PreparedWebSocketConnection {
-  if (!isOfficialOpenAIResponsesBaseUrl(client.baseURL)) {
+  if (!isOpenAIPlatformResponsesBaseUrl(client.baseURL)) {
     throw new Error("OpenAI Responses WebSocket requires the official API endpoint");
   }
   if (typeof client.apiKey !== "string" || client.apiKey.length === 0) {

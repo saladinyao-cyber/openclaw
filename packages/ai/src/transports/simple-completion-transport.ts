@@ -6,6 +6,7 @@
 import type { Api, Model, StreamFn } from "@openclaw/llm-core";
 import type { ApiRegistry } from "../api-registry.js";
 import { getAiTransportHost, resolveAiTransportHeaderSentinels } from "../host.js";
+import { normalizeCodexResponsesBaseUrl } from "./openai-endpoint.js";
 import {
   buildTransportAwareSimpleStreamFn,
   createOpenClawTransportStreamFnForModel,
@@ -16,8 +17,6 @@ import {
 
 const PROVIDER_SIMPLE_COMPLETION_API_PREFIX = "openclaw-provider-simple:";
 const PROVIDER_STREAM_API_PREFIX = "openclaw-provider-stream:";
-const INVALID_CODEX_BASE_URL_MESSAGE =
-  "OpenAI Codex Responses baseUrl must not include query parameters or fragments";
 
 function registerCustomApi(registry: ApiRegistry, api: Api, streamFn: StreamFn): boolean {
   getAiTransportHost().registerCustomApi(registry, api, streamFn);
@@ -34,49 +33,7 @@ function resolveAnthropicVertexSimpleApi(baseUrl?: string): Api {
 }
 
 export function normalizeCodexResponsesBaseUrlForOpenAISdk(baseUrl?: string): string {
-  const normalized = baseUrl?.trim() || "https://chatgpt.com/backend-api";
-  try {
-    const parsed = new URL(normalized);
-    const pathname = parsed.pathname.replace(/\/+$/u, "");
-    const path = pathname.toLowerCase();
-    if (
-      parsed.hostname.toLowerCase() === "chatgpt.com" &&
-      [
-        "/backend-api",
-        "/backend-api/v1",
-        "/backend-api/codex",
-        "/backend-api/codex/v1",
-        "/backend-api/codex/responses",
-      ].includes(path)
-    ) {
-      parsed.pathname = "/backend-api/codex";
-      parsed.search = "";
-      parsed.hash = "";
-      return parsed.toString().replace(/\/$/u, "");
-    }
-    if (normalized.includes("?") || normalized.includes("#")) {
-      throw new Error(INVALID_CODEX_BASE_URL_MESSAGE);
-    }
-    parsed.pathname = path.endsWith("/codex/responses")
-      ? pathname.slice(0, -"/responses".length)
-      : path.endsWith("/codex")
-        ? pathname
-        : `${pathname}/codex`;
-    return parsed.toString();
-  } catch (error) {
-    if (error instanceof Error && error.message === INVALID_CODEX_BASE_URL_MESSAGE) {
-      throw error;
-    }
-    // Keep non-URL custom values on the same suffix contract transport callers accept.
-  }
-  if (normalized.includes("?") || normalized.includes("#")) {
-    throw new Error(INVALID_CODEX_BASE_URL_MESSAGE);
-  }
-  const path = normalized.replace(/\/+$/u, "");
-  if (path.endsWith("/codex/responses")) {
-    return path.slice(0, -"/responses".length);
-  }
-  return path.endsWith("/codex") ? path : `${path}/codex`;
+  return normalizeCodexResponsesBaseUrl(baseUrl);
 }
 
 function resolveProviderSimpleCompletionApi(model: Model): Api {

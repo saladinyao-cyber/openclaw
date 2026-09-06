@@ -6,6 +6,7 @@ import {
   filterNonEmptyMemoryChunks,
   isRetryableMemoryEmbeddingError,
   isSplittableMemoryEmbeddingBatchError,
+  parseMemoryEmbeddingBatchItemLimit,
   resolveMemoryEmbeddingRetryDelay,
   runMemoryEmbeddingBatchRetryWithSplit,
   runMemoryEmbeddingRetryLoop,
@@ -214,7 +215,7 @@ describe("memory embedding policy", () => {
     for (const message of [
       "Embeddings API input limit exceeded: max 10, got 33. Request id: fixture-000597000",
       "embeddings max input length is 16",
-      "batch size is invalid, it should not be larger than 20",
+      "batch size is invalid, it should not be larger than 20.",
     ]) {
       expect(isSplittableMemoryEmbeddingBatchError(message)).toBe(true);
       expect(isRetryableMemoryEmbeddingError(message)).toBe(false);
@@ -232,6 +233,83 @@ describe("memory embedding policy", () => {
     expect(isRetryableMemoryEmbeddingError("HTTP 400: request id fixture-000597000")).toBe(false);
     expect(isRetryableMemoryEmbeddingError("HTTP 429: rate limit")).toBe(true);
     expect(isRetryableMemoryEmbeddingError("HTTP 503: service unavailable")).toBe(true);
+  });
+
+  it("parses only one positive explicit embedding item limit", () => {
+    expect(
+      parseMemoryEmbeddingBatchItemLimit(
+        "Embeddings API input limit exceeded: max 10, got 33. Request id: fixture-000597000",
+      ),
+    ).toBe(10);
+    expect(parseMemoryEmbeddingBatchItemLimit("embeddings max input length is 16")).toBe(16);
+    expect(
+      parseMemoryEmbeddingBatchItemLimit("batch size is invalid, it should not be larger than 10."),
+    ).toBe(10);
+    expect(
+      parseMemoryEmbeddingBatchItemLimit("Embeddings API input limit exceeded"),
+    ).toBeUndefined();
+    expect(
+      parseMemoryEmbeddingBatchItemLimit(
+        "embeddings max input length is 10; batch size is invalid, it should not be larger than 8",
+      ),
+    ).toBeUndefined();
+    expect(parseMemoryEmbeddingBatchItemLimit("embeddings max input length is 0")).toBeUndefined();
+  });
+
+  it("uses an explicit item limit while preserving output order", async () => {
+    const items = Array.from({ length: 33 }, (_, index) => index);
+    const run = vi.fn(async (batch: number[]) => {
+      if (batch.length > 10) {
+        throw new Error("embeddings max input length is 10");
+      }
+      return batch.map((item) => `output-${item}`);
+    });
+    await expect(
+      runMemoryEmbeddingBatchRetryWithSplit({
+        items,
+        run,
+        isRetryable: isRetryableMemoryEmbeddingError,
+        isSplittable: isSplittableMemoryEmbeddingBatchError,
+        waitForRetry: async () => {},
+        maxAttempts: 3,
+        baseDelayMs: 500,
+      }),
+    ).resolves.toEqual(items.map((item) => `output-${item}`));
+    const payloadCounts = run.mock.calls.map(([batch]) => batch.length);
+    expect(payloadCounts).toEqual([33, 10, 10, 10, 3]);
+    expect(payloadCounts.reduce((total, count) => total + count, 0)).toBe(66);
+  });
+
+  it("falls back to recursive splitting for unusable or stale limits", async () => {
+    for (const [errorMessage, expectedCalls] of [
+      ["embeddings max input length is 0", [4, 2, 2]],
+      [
+        "embeddings max input length is 4; batch size is invalid, it should not be larger than 3",
+        [4, 2, 2],
+      ],
+      ["embeddings max input length is 4", [4, 2, 2]],
+      ["embeddings max input length is 8", [4, 2, 2]],
+      ["embeddings max input length is 3", [4, 3, 2, 1, 1]],
+    ] as const) {
+      const run = vi.fn(async (items: number[]) => {
+        if (items.length > 2) {
+          throw new Error(errorMessage);
+        }
+        return items;
+      });
+      await expect(
+        runMemoryEmbeddingBatchRetryWithSplit({
+          items: [0, 1, 2, 3],
+          run,
+          isRetryable: isRetryableMemoryEmbeddingError,
+          isSplittable: isSplittableMemoryEmbeddingBatchError,
+          waitForRetry: async () => {},
+          maxAttempts: 1,
+          baseDelayMs: 500,
+        }),
+      ).resolves.toEqual([0, 1, 2, 3]);
+      expect(run.mock.calls.map(([items]) => items.length)).toEqual(expectedCalls);
+    }
   });
 
   it("splits OpenAI 431 oversized embedding batches without retrying the same request", async () => {

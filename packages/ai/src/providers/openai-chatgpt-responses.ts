@@ -13,6 +13,7 @@ import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost, resolveAiTransportHeaderSentinels } from "../host.js";
 import type { BaseOpenAIStreamOptions } from "../provider-options.js";
 import { registerSessionResourceCleanup } from "../session-resources.js";
+import { resolveCodexResponsesUrl } from "../transports/openai-endpoint.js";
 import {
   buildOpenAIResponsesReasoningReplayMetadata,
   suppressOpenAIResponsesCompaction,
@@ -101,7 +102,6 @@ const os = loadNodeOs();
 // Configuration
 // ============================================================================
 
-const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const REQUEST_COMPRESSION_ZSTD_LEVEL = 3;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
@@ -712,15 +712,7 @@ function resolveCodexServiceTier(
 }
 
 function resolveCodexUrl(baseUrl?: string): string {
-  const raw = baseUrl && baseUrl.trim().length > 0 ? baseUrl : DEFAULT_CODEX_BASE_URL;
-  const normalized = raw.replace(/\/+$/, "");
-  if (normalized.endsWith("/codex/responses")) {
-    return normalized;
-  }
-  if (normalized.endsWith("/codex")) {
-    return `${normalized}/responses`;
-  }
-  return `${normalized}/codex/responses`;
+  return resolveCodexResponsesUrl(baseUrl);
 }
 
 function resolveCodexWebSocketUrl(baseUrl?: string): string {

@@ -19,11 +19,22 @@ const reasoningModel = {
 } satisfies Model<"openai-responses">;
 
 describe("sanitizeOpenAICodexResponsesParams", () => {
-  it("restores stateless Codex payload policy for provider-stream aliases", () => {
+  it.each([
+    ["openai-chatgpt-responses", "https://chatgpt.com/backend-api/codex"],
+    ["openai-chatgpt-responses", "https://chatgpt.com/backend-api/codex/responses"],
+    [
+      "openclaw-provider-stream:openai:gpt-5.6-luna:openai-chatgpt-responses:https%3A%2F%2Fchatgpt.com%2Fbackend-api%2Fcodex",
+      "https://chatgpt.com/backend-api/codex",
+    ],
+    [
+      "openclaw-provider-stream:openai:gpt-5.6-luna:openai-chatgpt-responses:https%3A%2F%2Fchatgpt.com%2Fbackend-api%2Fcodex%2Fresponses",
+      "https://chatgpt.com/backend-api/codex/responses",
+    ],
+  ])("enforces final stateless Codex payload policy for %s at %s", (api, baseUrl) => {
     const providerStreamModel = {
       ...reasoningModel,
-      api: "openclaw-provider-stream:openai:gpt-5.6-luna:openai-chatgpt-responses:https%3A%2F%2Fchatgpt.com%2Fbackend-api%2Fcodex",
-      baseUrl: "https://chatgpt.com/backend-api/codex",
+      api,
+      baseUrl,
     } as Model;
     const params = sanitizeOpenAICodexResponsesParams(providerStreamModel, {
       model: providerStreamModel.id,
@@ -46,6 +57,24 @@ describe("sanitizeOpenAICodexResponsesParams", () => {
     });
 
     expect(params).toEqual({ store: true, max_output_tokens: 128 });
+  });
+
+  it.each([
+    ["openai-responses", "https://chatgpt.com/backend-api/codex"],
+    ["openai-chatgpt-responses", "https://chatgpt.com.evil.example/backend-api/codex"],
+    ["openai-chatgpt-responses", "http://chatgpt.com/backend-api/codex"],
+    [
+      "openclaw-provider-stream:openai:model:openai-responses:encoded",
+      "https://chatgpt.com/backend-api/codex",
+    ],
+  ])("does not rewrite non-native route %s at %s", (api, baseUrl) => {
+    const model = { ...reasoningModel, api, baseUrl } as Model;
+    const params = { store: true, max_output_tokens: 128 };
+
+    expect(sanitizeOpenAICodexResponsesParams(model, params)).toEqual({
+      store: true,
+      max_output_tokens: 128,
+    });
   });
 });
 

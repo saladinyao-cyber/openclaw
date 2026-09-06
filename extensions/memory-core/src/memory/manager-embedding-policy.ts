@@ -57,6 +57,21 @@ const RETRYABLE_MEMORY_EMBEDDING_TRANSPORT_ERROR_RE =
 const SPLITTABLE_MEMORY_EMBEDDING_BATCH_ERROR_RE =
   /(request_headers_too_large|request header fields too large|other side closed|ECONNRESET|EPIPE|UND_ERR_SOCKET|socket hang up|socket terminated|read ECONN|connection (?:reset|aborted)|batch size is invalid, it should not be larger than\s+\d+|\bembeddings (?:api input limit exceeded:\s*max\s+\d+\s*,\s*got\s+\d+|max input length is\s+\d+)\b)/i;
 
+const MEMORY_EMBEDDING_BATCH_ITEM_LIMIT_RE =
+  /\b(?:embeddings api input limit exceeded:\s*max\s+(\d+)\s*,\s*got\s+\d+|embeddings max input length is\s+(\d+)|batch size is invalid,\s*it should not be larger than\s+(\d+))\b/gi;
+
+export function parseMemoryEmbeddingBatchItemLimit(message: string): number | undefined {
+  const limits = new Set<number>();
+  for (const match of message.matchAll(MEMORY_EMBEDDING_BATCH_ITEM_LIMIT_RE)) {
+    const value = Number(match[1] ?? match[2] ?? match[3]);
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      return undefined;
+    }
+    limits.add(value);
+  }
+  return limits.size === 1 ? limits.values().next().value : undefined;
+}
+
 export function isSplittableMemoryEmbeddingBatchError(message: string): boolean {
   return SPLITTABLE_MEMORY_EMBEDDING_BATCH_ERROR_RE.test(message);
 }
@@ -119,6 +134,21 @@ export async function runMemoryEmbeddingBatchRetryWithSplit<TInput, TOutput>(par
     const message = formatErrorMessage(err);
     if (params.items.length <= 1 || !params.isSplittable(message)) {
       throw err;
+    }
+
+    const itemLimit = parseMemoryEmbeddingBatchItemLimit(message);
+    if (itemLimit !== undefined && itemLimit < params.items.length) {
+      params.onSplit?.({ itemCount: params.items.length, splitAt: itemLimit, message });
+      const results: TOutput[] = [];
+      for (let start = 0; start < params.items.length; start += itemLimit) {
+        results.push(
+          ...(await runMemoryEmbeddingBatchRetryWithSplit({
+            ...params,
+            items: params.items.slice(start, start + itemLimit),
+          })),
+        );
+      }
+      return results;
     }
 
     const splitAt = Math.ceil(params.items.length / 2);

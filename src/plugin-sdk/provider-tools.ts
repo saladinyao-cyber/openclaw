@@ -7,6 +7,7 @@ import {
   normalizeOpenAIStrictCompatSchema,
   stripUnsupportedSchemaKeywords,
 } from "@openclaw/ai/internal/openai";
+import { classifyOpenAIBaseUrl } from "@openclaw/ai/transports";
 // Provider tool helpers expose shared tool-call payload contracts for provider plugins.
 import type { TSchema } from "typebox";
 import type {
@@ -170,30 +171,25 @@ function shouldApplyOpenAIToolCompat(ctx: ProviderNormalizeToolSchemasContext): 
   const provider = (ctx.model?.provider ?? ctx.provider ?? "").trim().toLowerCase();
   const api = (ctx.model?.api ?? ctx.modelApi ?? "").trim().toLowerCase();
   const baseUrl = (ctx.model?.baseUrl ?? "").trim().toLowerCase();
+  const endpointKind = classifyOpenAIBaseUrl(baseUrl);
 
   if (provider === "openai") {
     if (api === "openai-responses") {
       // Strict-schema normalization is only safe for the native OpenAI endpoint;
       // OpenAI-compatible proxies may accept broader schemas or define their own rules.
-      return !baseUrl || isOpenAIResponsesBaseUrl(baseUrl);
+      return !baseUrl || endpointKind === "platform";
     }
     return (
       api === "openai-chatgpt-responses" &&
       // Codex/ChatGPT Responses uses the same strict object-schema contract as native
       // OpenAI Responses, but only on the known first-party backend URLs.
-      (!baseUrl || isOpenAIResponsesBaseUrl(baseUrl) || isOpenAICodexBaseUrl(baseUrl))
+      (!baseUrl || endpointKind === "platform" || endpointKind === "chatgpt")
     );
   }
   return false;
 }
 
-function isOpenAIResponsesBaseUrl(baseUrl: string): boolean {
-  return /^https:\/\/api\.openai\.com(?:\/v1)?(?:\/|$)/i.test(baseUrl);
-}
-
-function isOpenAICodexBaseUrl(baseUrl: string): boolean {
-  return /^https:\/\/chatgpt\.com\/backend-api(?:\/|$)/i.test(baseUrl);
-}
+export { classifyOpenAIBaseUrl };
 
 /**
  * Reports OpenAI strict-schema diagnostics for transports that enforce them before dispatch.
