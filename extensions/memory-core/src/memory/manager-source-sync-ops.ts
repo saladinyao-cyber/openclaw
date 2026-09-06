@@ -234,6 +234,12 @@ export abstract class MemoryManagerSourceSyncOps extends MemoryManagerSessionSyn
     const files = targetArchiveFiles
       ? Array.from(targetArchiveFiles)
       : corpusEntries.map((entry) => entry.sessionFile);
+    // Targeted archive cleanup deletes live-index rows that were superseded by an
+    // archive artifact. Capture their hashes at plan time so a concurrent writer
+    // that re-publishes the same session path is detected before deletion.
+    const plannedSessionHashes = targetArchiveFiles
+      ? loadMemorySourceFileState({ db: this.db, source: "sessions" }).hashes
+      : null;
     const sessionPlan = resolveMemorySessionSyncPlan({
       needsFullReindex: params.needsFullReindex,
       files,
@@ -316,12 +322,11 @@ export abstract class MemoryManagerSourceSyncOps extends MemoryManagerSessionSyn
             .map((entry) => this.sessionPathForCorpusEntry(entry)),
         );
         runSqliteImmediateTransactionSync(this.db, () => {
-          const existingSessionPaths = new Set(
-            loadMemorySourceFileState({
-              db: this.db,
-              source: "sessions",
-            }).rows.map((row) => row.path),
-          );
+          const existingSessionState = loadMemorySourceFileState({
+            db: this.db,
+            source: "sessions",
+          });
+          const existingSessionPaths = new Set(existingSessionState.rows.map((row) => row.path));
           for (const file of targetArchiveFiles) {
             const corpusEntry = corpusEntryForPath(file);
             const staleAgentId = corpusEntry.agentId;
@@ -333,6 +338,16 @@ export abstract class MemoryManagerSourceSyncOps extends MemoryManagerSessionSyn
               if (
                 activeCorpusPaths.has(staleLivePath) ||
                 !existingSessionPaths.has(staleLivePath)
+              ) {
+                continue;
+              }
+              // CAS: the live row must still match the plan-time snapshot. A
+              // concurrent writer re-publishing the same session path changes its
+              // hash, so deleting it here would silently drop the fresh index.
+              if (
+                plannedSessionHashes !== null &&
+                existingSessionState.hashes.get(staleLivePath) !==
+                  plannedSessionHashes.get(staleLivePath)
               ) {
                 continue;
               }
