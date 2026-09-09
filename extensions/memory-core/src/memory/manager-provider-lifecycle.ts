@@ -110,7 +110,7 @@ export function resolveMemoryEmbeddingProviderRequirement(params: {
 
 export abstract class MemoryProviderLifecycle extends MemoryManagerEmbeddingOps {
   protected abstract readonly cacheKey: string;
-  protected abstract readonly purpose: "default" | "status" | "cli" | "maintenance";
+  protected abstract readonly purpose: "default" | "status" | "cli" | "search" | "maintenance";
   protected abstract readonly providerRequirement: MemoryEmbeddingProviderRequirement;
   protected abstract readonly requestedProvider: EmbeddingProviderRequest;
   protected abstract providerInitPromise: Promise<void> | null;
@@ -218,7 +218,7 @@ export abstract class MemoryProviderLifecycle extends MemoryManagerEmbeddingOps 
 
     const currentIdentity = this.refreshIndexIdentityDirty({ providerKeyKnown: true });
     let activeFailure = failure;
-    if (currentIdentity.status !== "valid") {
+    if (currentIdentity.status !== "valid" && this.purpose !== "search") {
       try {
         await this.syncAdmitted({ reason: "search", force: true });
       } catch (err) {
@@ -259,13 +259,14 @@ export abstract class MemoryProviderLifecycle extends MemoryManagerEmbeddingOps 
   }
 
   protected async adoptPublishedFallbackProviderIfMatched(): Promise<boolean> {
-    if (this.fallbackFrom || !this.provider) {
+    if (this.fallbackFrom) {
       return false;
     }
-    const currentProviderId = resolveFallbackCurrentProviderId({
-      provider: this.provider,
-      lifecycle: this.providerLifecycle,
-    });
+    const currentProviderId =
+      resolveFallbackCurrentProviderId({
+        provider: this.provider,
+        lifecycle: this.providerLifecycle,
+      }) ?? (this.settings.provider === "none" ? null : this.settings.provider);
     const fallbackRequest = resolveMemoryFallbackProviderRequest({
       cfg: this.cfg,
       settings: this.settings,
@@ -280,14 +281,21 @@ export abstract class MemoryProviderLifecycle extends MemoryManagerEmbeddingOps 
     ) {
       return false;
     }
+    if (!this.provider && currentProviderId) {
+      this.providerLifecycle = {
+        mode: "degraded",
+        providerId: currentProviderId,
+        reason: "published memory index uses the configured fallback provider",
+      };
+    }
     const activated = await this.activateFallbackProvider(
       "published memory index uses the configured fallback provider",
     );
-    return (
-      activated &&
-      this.refreshIndexIdentityDirty({ providerKeyKnown: this.providerInitialized }).status ===
-        "valid"
-    );
+    if (!activated) {
+      return false;
+    }
+    this.providerInitialized = true;
+    return this.refreshIndexIdentityDirty({ providerKeyKnown: true }).status === "valid";
   }
 
   protected async confirmEmbeddingBootstrapRecovery(): Promise<boolean> {
