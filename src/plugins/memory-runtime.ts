@@ -178,7 +178,7 @@ function ensureMemoryRuntime(params?: {
 export async function getActiveMemorySearchManagerCore(params: {
   cfg: OpenClawConfig;
   agentId: string;
-  purpose?: "default" | "status" | "cli";
+  purpose?: "default" | "status" | "cli" | "search";
   inspectSources?: boolean;
 }) {
   const owner = ensureMemoryRuntime(params);
@@ -188,13 +188,25 @@ export async function getActiveMemorySearchManagerCore(params: {
   if (owner.registry) {
     setStandaloneMemoryManagerActive(true);
   }
-  const result = await withMemoryRuntimeOwner(
-    owner,
-    async (runtime) => await runtime.getMemorySearchManager(params),
-  );
+  let transientSearchManager = false;
+  const result = await withMemoryRuntimeOwner(owner, async (runtime) => {
+    if (params.purpose === "search" && runtime.getReusableMemorySearchManager) {
+      return await runtime.getReusableMemorySearchManager({
+        cfg: params.cfg,
+        agentId: params.agentId,
+        ...(params.inspectSources === undefined ? {} : { inspectSources: params.inspectSources }),
+      });
+    }
+    transientSearchManager = params.purpose === "search";
+    return await runtime.getMemorySearchManager({
+      ...params,
+      purpose: params.purpose === "search" ? "cli" : params.purpose,
+    });
+  });
   return {
     ...result,
     manager: result.manager ? normalizeRegisteredMemoryManager(result.manager) : null,
+    ...(transientSearchManager && result.manager ? { transient: true as const } : {}),
   };
 }
 
