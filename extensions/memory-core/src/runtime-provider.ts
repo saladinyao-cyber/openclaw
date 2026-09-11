@@ -23,7 +23,12 @@ export function createMemoryRuntime(host: MemoryCoreRuntimeHost = {}) {
       });
       return {
         manager,
-        debug,
+        debug: debug
+          ? {
+              ...debug,
+              purpose: params.purpose ?? "default",
+            }
+          : undefined,
         error,
       };
     },
